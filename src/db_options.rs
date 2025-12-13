@@ -1850,6 +1850,35 @@ impl Options {
         }
     }
 
+    /// Add an event listener to the options.
+    ///
+    /// Event listeners can be used to monitor RocksDB events such as flush,
+    /// compaction, etc.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rocksdb::{Options, EventListener};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// let mut opts = Options::default();
+    /// let flush_count = Arc::new(Mutex::new(0));
+    /// let flush_count_clone = flush_count.clone();
+    ///
+    /// let listener = EventListener::new(
+    ///     None,
+    ///     Some(Box::new(move |info| {
+    ///         *flush_count_clone.lock().unwrap() += 1;
+    ///     })),
+    /// );
+    /// opts.add_event_listener(listener);
+    /// ```
+    pub fn add_event_listener(&mut self, listener: *mut ffi::rocksdb_eventlistener_t) {
+        unsafe {
+            ffi::rocksdb_options_add_eventlistener(self.inner, listener);
+        }
+    }
+
     /// Prepare the DB for bulk loading.
     ///
     /// All data will be in level 0 without any automatic compaction.

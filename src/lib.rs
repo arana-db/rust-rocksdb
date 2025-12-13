@@ -94,6 +94,7 @@ mod db_iterator;
 mod db_options;
 mod db_pinnable_slice;
 mod env;
+mod event_listener;
 mod iter_range;
 pub mod merge_operator;
 pub mod perf;
@@ -131,6 +132,7 @@ pub use crate::{
     },
     db_pinnable_slice::DBPinnableSlice,
     env::Env,
+    event_listener::{EventListener, FlushJobInfo, new_event_listener},
     ffi_util::CStrLike,
     iter_range::{IterateBounds, PrefixRange},
     merge_operator::MergeOperands,
