@@ -71,6 +71,9 @@ impl FlushJobInfo {
     }
 }
 
+// WARNING: If an EventListener implementation panics, the panic will unwind across the C/FFI boundary,
+// which is undefined behavior in Rust. Consider using std::panic::catch_unwind to wrap the callback body
+// to prevent panic propagation to C code. Not fixing this issue for now.
 pub trait EventListener: Send + Sync {
     fn on_flush_begin(&self, _: &FlushJobInfo) {}
     fn on_flush_completed(&self, _: &FlushJobInfo) {}
