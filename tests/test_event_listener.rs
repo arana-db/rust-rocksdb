@@ -14,9 +14,9 @@
 
 mod util;
 
+use rocksdb::{new_event_listener, EventListener, FlushJobInfo, FlushOptions, Options, DB};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
-use rocksdb::{DB, EventListener, FlushOptions, FlushJobInfo, Options, new_event_listener};
 use util::DBPath;
 
 struct TestEventListener {

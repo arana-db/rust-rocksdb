@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 // /* Event listener */
 // typedef void (*on_flush_begin_cb)(void*, rocksdb_t*,
 //     const rocksdb_flushjobinfo_t*);
@@ -47,27 +46,19 @@ impl FlushJobInfo {
     }
 
     pub fn triggered_writes_slowdown(&self) -> bool {
-        unsafe {
-            ffi::rocksdb_flushjobinfo_triggered_writes_slowdown(self.inner) != 0
-        }
+        unsafe { ffi::rocksdb_flushjobinfo_triggered_writes_slowdown(self.inner) != 0 }
     }
 
     pub fn triggered_writes_stop(&self) -> bool {
-        unsafe {
-            ffi::rocksdb_flushjobinfo_triggered_writes_stop(self.inner) != 0
-        }
+        unsafe { ffi::rocksdb_flushjobinfo_triggered_writes_stop(self.inner) != 0 }
     }
 
     pub fn largest_seqno(&self) -> u64 {
-        unsafe {
-            ffi::rocksdb_flushjobinfo_largest_seqno(self.inner)
-        }
+        unsafe { ffi::rocksdb_flushjobinfo_largest_seqno(self.inner) }
     }
 
     pub fn smallest_seqno(&self) -> u64 {
-        unsafe {
-            ffi::rocksdb_flushjobinfo_smallest_seqno(self.inner)
-        }
+        unsafe { ffi::rocksdb_flushjobinfo_smallest_seqno(self.inner) }
     }
 }
 
@@ -174,8 +165,6 @@ unsafe extern "C" fn on_memtable_sealed<E: EventListener>(
 ) {
     // TODO
 }
-
-
 
 pub fn new_event_listener<E: EventListener>(e: E) -> *mut ffi::rocksdb_eventlistener_t {
     let p = Box::new(e);
