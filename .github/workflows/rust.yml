@@ -113,7 +113,6 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          target: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
