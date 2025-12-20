@@ -62,6 +62,36 @@ impl FlushJobInfo {
     }
 }
 
+/// A handle to an EventListener that manages its lifetime.
+pub struct EventListenerHandle {
+    inner: *mut ffi::rocksdb_eventlistener_t,
+    owned: bool,
+}
+
+unsafe impl Send for EventListenerHandle {}
+unsafe impl Sync for EventListenerHandle {}
+
+impl EventListenerHandle {
+    pub(crate) unsafe fn from_raw(ptr: *mut ffi::rocksdb_eventlistener_t) -> Self {
+        Self {
+            inner: ptr,
+            owned: true,
+        }
+    }
+    pub(crate) fn into_raw(mut self) -> *mut ffi::rocksdb_eventlistener_t {
+        self.owned = false;
+        self.inner
+    }
+}
+impl Drop for EventListenerHandle {
+    fn drop(&mut self) {
+        if self.owned && !self.inner.is_null() {
+            unsafe {
+                ffi::rocksdb_eventlistener_destroy(self.inner);
+            }
+        }
+    }
+}
 // WARNING: If an EventListener implementation panics, the panic will unwind across the C/FFI boundary,
 // which is undefined behavior in Rust. Consider using std::panic::catch_unwind to wrap the callback body
 // to prevent panic propagation to C code. Not fixing this issue for now.
@@ -166,9 +196,9 @@ unsafe extern "C" fn on_memtable_sealed<E: EventListener>(
     // TODO
 }
 
-pub fn new_event_listener<E: EventListener>(e: E) -> *mut ffi::rocksdb_eventlistener_t {
+pub fn new_event_listener<E: EventListener>(e: E) -> EventListenerHandle {
     let p = Box::new(e);
-    unsafe {
+    let ptr = unsafe {
         ffi::rocksdb_eventlistener_create(
             Box::into_raw(p) as *mut c_void,
             Some(destructor::<E>),
@@ -183,5 +213,6 @@ pub fn new_event_listener<E: EventListener>(e: E) -> *mut ffi::rocksdb_eventlist
             Some(on_stall_conditions_changed::<E>),
             Some(on_memtable_sealed::<E>),
         )
-    }
+    };
+    unsafe { EventListenerHandle::from_raw(ptr) }
 }

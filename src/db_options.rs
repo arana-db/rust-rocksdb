@@ -30,6 +30,7 @@ use crate::{
     },
     db::DBAccess,
     env::Env,
+    event_listener::EventListenerHandle,
     ffi,
     ffi_util::{from_cstr, to_cpath, CStrLike},
     merge_operator::{
@@ -1855,28 +1856,40 @@ impl Options {
     /// Event listeners can be used to monitor RocksDB events such as flush,
     /// compaction, etc.
     ///
+    /// The listener will be owned by RocksDB and destroyed when the Options are destroyed.
+    ///
     /// # Examples
     ///
     /// ```
-    /// use rocksdb::{Options, EventListener};
-    /// use std::sync::{Arc, Mutex};
+    /// use rocksdb::{new_event_listener, Options, EventListener, FlushJobInfo};
+    /// use std::sync::atomic::{AtomicI32, Ordering};
+    /// use std::sync::Arc;
+    ///
+    /// struct MyEventListener {
+    ///     flush_count: Arc<AtomicI32>,
+    /// }
+    ///
+    /// impl EventListener for MyEventListener {
+    ///     fn on_flush_begin(&self, _info: &FlushJobInfo) {
+    ///         self.flush_count.fetch_add(1, Ordering::Relaxed);
+    ///     }
+    /// }
     ///
     /// let mut opts = Options::default();
-    /// let flush_count = Arc::new(Mutex::new(0));
-    /// let flush_count_clone = flush_count.clone();
+    /// let flush_count = Arc::new(AtomicI32::new(0));
     ///
-    /// let listener = EventListener::new(
-    ///     None,
-    ///     Some(Box::new(move |info| {
-    ///         *flush_count_clone.lock().unwrap() += 1;
-    ///     })),
-    /// );
-    /// opts.add_event_listener(listener);
+    /// let listener = MyEventListener {
+    ///     flush_count: flush_count.clone(),
+    /// };
+    /// let listener_handle = new_event_listener(listener);
+    /// opts.add_event_listener(listener_handle);
     /// ```
-    pub fn add_event_listener(&mut self, listener: *mut ffi::rocksdb_eventlistener_t) {
+    pub fn add_event_listener(&mut self, listener: EventListenerHandle) {
+        let ptr: *mut librocksdb_sys::rocksdb_eventlistener_t = listener.into_raw();
         unsafe {
-            ffi::rocksdb_options_add_eventlistener(self.inner, listener);
+            ffi::rocksdb_options_add_eventlistener(self.inner, ptr);
         }
+        // listener is dropped here, but owned is false so Drop won't destroy it
     }
 
     /// Prepare the DB for bulk loading.

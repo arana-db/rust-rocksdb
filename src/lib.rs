@@ -132,7 +132,7 @@ pub use crate::{
     },
     db_pinnable_slice::DBPinnableSlice,
     env::Env,
-    event_listener::{new_event_listener, EventListener, FlushJobInfo},
+    event_listener::{new_event_listener, EventListener, EventListenerHandle, FlushJobInfo},
     ffi_util::CStrLike,
     iter_range::{IterateBounds, PrefixRange},
     merge_operator::MergeOperands,
