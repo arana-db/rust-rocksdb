@@ -31,6 +31,7 @@ use crate::{
     ColumnFamilyDescriptor, Error, SnapshotWithThreadMode,
     compaction_filter::{self, CompactionFilterCallback, CompactionFilterFn},
     compaction_filter_factory::{self, CompactionFilterFactory},
+    table_properties_collector_factory::{self, TablePropertiesCollectorFactory},
     comparator::{
         ComparatorCallback, ComparatorWithTsCallback, CompareFn, CompareTsFn, CompareWithoutTsFn,
     },
@@ -1704,6 +1705,31 @@ impl Options {
     pub fn add_event_listener<L: EventListener>(&mut self, l: L) {
         let handle = new_event_listener(l);
         unsafe { ffi::rocksdb_options_add_eventlistener(self.inner, handle.inner) }
+    }
+
+    /// Sets a table properties collector factory that will be used to create
+    /// TablePropertiesCollector instances for each table build.
+    ///
+    /// Each table build will create a new TablePropertiesCollector allowing
+    /// the application to know about different table builds.
+    ///
+    /// Default: nullptr
+    pub fn set_table_properties_collector_factory<F>(&mut self, factory: F)
+    where
+        F: TablePropertiesCollectorFactory + 'static,
+    {
+        let factory = Box::new(factory);
+
+        unsafe {
+            let tpcf = ffi::rocksdb_table_properties_collector_factory_create(
+                Box::into_raw(factory).cast::<c_void>(),
+                Some(table_properties_collector_factory::destructor_callback::<F>), 
+                Some(table_properties_collector_factory::create_table_properties_collector_callback::<F>), 
+                Some(table_properties_collector_factory::name_callback::<F>),
+            );
+
+            ffi::rocksdb_options_add_table_properties_collector_factory(self.inner, tpcf);
+        }
     }
 
     /// This is a factory that provides compaction filter objects which allow

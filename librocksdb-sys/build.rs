@@ -40,6 +40,8 @@ fn rocksdb_include_dir() -> String {
 fn bindgen_rocksdb() {
     let bindings = bindgen::Builder::default()
         .header(rocksdb_include_dir() + "/rocksdb/c.h")
+        .header("rocksdb_ext/c_ext.h")
+        .clang_arg(format!("-I{}", rocksdb_include_dir()))
         .derive_debug(false)
         .blocklist_type("max_align_t") // https://github.com/rust-lang-nursery/rust-bindgen/issues/550
         .ctypes_prefix("libc")
@@ -131,6 +133,7 @@ fn build_rocksdb() {
     }
 
     config.include(".");
+    config.include("rocksdb_ext/");
     config.define("NDEBUG", Some("1"));
 
     let mut lib_sources = include_str!("rocksdb_lib_sources.txt")
@@ -331,6 +334,9 @@ fn build_rocksdb() {
     }
 
     config.file("build_version.cc");
+
+    // Compile our C extension for table_properties_collector_factory support
+    config.file("rocksdb_ext/c_ext.cc");
 
     config.cpp(true);
     config.flag_if_supported("-std=c++20");
