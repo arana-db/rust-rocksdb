@@ -120,6 +120,25 @@ impl TablePropertiesCollector for ExampleCollector {
         self.encode()
     }
 
+    fn get_readable_properties(&self) -> HashMap<Vec<u8>, Vec<u8>> {
+        let mut props = HashMap::new();
+        props.insert(b"num_keys".to_vec(), self.num_keys.to_string().into_bytes());
+        props.insert(b"num_puts".to_vec(), self.num_puts.to_string().into_bytes());
+        props.insert(
+            b"num_merges".to_vec(),
+            self.num_merges.to_string().into_bytes(),
+        );
+        props.insert(
+            b"num_deletes".to_vec(),
+            self.num_deletes.to_string().into_bytes(),
+        );
+        props.insert(
+            b"description".to_vec(),
+            b"Human-readable table properties for debugging".to_vec(),
+        );
+        props
+    }
+
     fn name(&self) -> &CStr {
         unsafe { CStr::from_bytes_with_nul_unchecked(b"example-collector\0") }
     }
@@ -288,4 +307,97 @@ fn test_lifetimes() {
     // references should be properly cleaned up without use-after-free errors.
     // This test verifies that the lifetime management is correct by ensuring
     // the test completes without panics or memory errors.
+}
+
+#[test]
+fn test_table_properties_collector_get_readable_properties() {
+    let mut collector = ExampleCollector::new();
+
+    // Add some data
+    collector.add(b"key1", b"value1", DBEntryType::Put, 1, 100);
+    collector.add(b"key2", b"value2", DBEntryType::Put, 2, 100);
+    collector.add(b"key3", b"value3", DBEntryType::Delete, 3, 100);
+    collector.add(b"key4", b"value4", DBEntryType::Merge, 4, 100);
+
+    // Test get_readable_properties method
+    let readable_props = collector.get_readable_properties();
+
+    // Verify all expected keys are present
+    assert!(readable_props.contains_key(b"num_keys".as_slice()));
+    assert!(readable_props.contains_key(b"num_puts".as_slice()));
+    assert!(readable_props.contains_key(b"num_merges".as_slice()));
+    assert!(readable_props.contains_key(b"num_deletes".as_slice()));
+    assert!(readable_props.contains_key(b"description".as_slice()));
+
+    // Verify the values are human-readable strings
+    let num_keys_str = String::from_utf8(readable_props[b"num_keys".as_slice()].clone()).unwrap();
+    let num_puts_str = String::from_utf8(readable_props[b"num_puts".as_slice()].clone()).unwrap();
+    let num_merges_str =
+        String::from_utf8(readable_props[b"num_merges".as_slice()].clone()).unwrap();
+    let num_deletes_str =
+        String::from_utf8(readable_props[b"num_deletes".as_slice()].clone()).unwrap();
+
+    assert_eq!(num_keys_str, "4");
+    assert_eq!(num_puts_str, "2");
+    assert_eq!(num_merges_str, "1");
+    assert_eq!(num_deletes_str, "1");
+
+    // Verify the description
+    assert_eq!(
+        readable_props[b"description".as_slice()],
+        b"Human-readable table properties for debugging"
+    );
+}
+
+#[test]
+fn test_table_properties_collector_readable_vs_finish() {
+    let mut collector = ExampleCollector::new();
+
+    // Add data
+    collector.add(b"key1", b"value1", DBEntryType::Put, 1, 100);
+    collector.add(b"key2", b"value2", DBEntryType::Put, 2, 100);
+
+    // Get both types of properties
+    let readable = collector.get_readable_properties();
+    let finished = collector.finish();
+
+    // Verify they have different formats
+    // readable properties should have string keys like "num_keys"
+    assert!(readable.contains_key(b"num_keys".as_slice()));
+
+    // finished properties should have binary keys (Props enum values)
+    assert!(finished.contains_key(&vec![Props::NumKeys as u8]));
+
+    // But they should contain equivalent information
+    let readable_keys = String::from_utf8(readable[b"num_keys".as_slice()].clone()).unwrap();
+    let finished_keys = decode_u32(&finished[&vec![Props::NumKeys as u8]]);
+
+    assert_eq!(readable_keys.parse::<u32>().unwrap(), finished_keys);
+}
+
+#[test]
+fn test_table_properties_collector_empty_readable() {
+    // Test get_readable_properties on a fresh collector
+    let collector = ExampleCollector::new();
+
+    let props = collector.get_readable_properties();
+
+    // Should still return all expected keys with zero values
+    assert_eq!(props.len(), 5);
+    assert_eq!(
+        String::from_utf8(props[b"num_keys".as_slice()].clone()).unwrap(),
+        "0"
+    );
+    assert_eq!(
+        String::from_utf8(props[b"num_puts".as_slice()].clone()).unwrap(),
+        "0"
+    );
+    assert_eq!(
+        String::from_utf8(props[b"num_merges".as_slice()].clone()).unwrap(),
+        "0"
+    );
+    assert_eq!(
+        String::from_utf8(props[b"num_deletes".as_slice()].clone()).unwrap(),
+        "0"
+    );
 }
