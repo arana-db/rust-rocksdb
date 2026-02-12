@@ -12,3 +12,5 @@ path
 .sisyphus/
 AGENTS.md
 docs/
+# Local git worktrees
+.worktrees/
