@@ -9,3 +9,6 @@ path
 .DS_Store
 .idea
 .vscode
+.sisyphus/
+AGENTS.md
+docs/

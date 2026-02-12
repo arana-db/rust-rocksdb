@@ -31,7 +31,6 @@ use crate::{
     ColumnFamilyDescriptor, Error, SnapshotWithThreadMode,
     compaction_filter::{self, CompactionFilterCallback, CompactionFilterFn},
     compaction_filter_factory::{self, CompactionFilterFactory},
-    table_properties_collector_factory::{self, TablePropertiesCollectorFactory},
     comparator::{
         ComparatorCallback, ComparatorWithTsCallback, CompareFn, CompareTsFn, CompareWithoutTsFn,
     },
@@ -44,6 +43,7 @@ use crate::{
     },
     slice_transform::SliceTransform,
     statistics::Ticker,
+    table_properties_collector_factory::{self, TablePropertiesCollectorFactory},
 };
 
 // must be Send and Sync because it will be called by RocksDB from different threads
@@ -1723,8 +1723,12 @@ impl Options {
         unsafe {
             let tpcf = ffi::rocksdb_table_properties_collector_factory_create(
                 Box::into_raw(factory).cast::<c_void>(),
-                Some(table_properties_collector_factory::destructor_callback::<F>), 
-                Some(table_properties_collector_factory::create_table_properties_collector_callback::<F>), 
+                Some(table_properties_collector_factory::destructor_callback::<F>),
+                Some(
+                    table_properties_collector_factory::create_table_properties_collector_callback::<
+                        F,
+                    >,
+                ),
                 Some(table_properties_collector_factory::name_callback::<F>),
             );
 

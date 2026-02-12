@@ -18,9 +18,11 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 
 use rust_rocksdb::{
-    ColumnFamilyDescriptor, Options, DB,
+    ColumnFamilyDescriptor, DB, Options,
     table_properties_collector::{DBEntryType, TablePropertiesCollector},
-    table_properties_collector_factory::{TablePropertiesCollectorContext, TablePropertiesCollectorFactory},
+    table_properties_collector_factory::{
+        TablePropertiesCollectorContext, TablePropertiesCollectorFactory,
+    },
 };
 use util::DBPath;
 
@@ -88,9 +90,11 @@ impl ExampleCollector {
         for (k, v) in props {
             assert_eq!(v, props.get(k).unwrap());
         }
-        assert!(props
-            .get(&vec![Props::NumKeys as u8, Props::NumPuts as u8])
-            .is_none());
+        assert!(
+            props
+                .get(&vec![Props::NumKeys as u8, Props::NumPuts as u8])
+                .is_none()
+        );
         assert!(props.len() >= 4);
 
         c
@@ -146,14 +150,13 @@ fn test_table_properties_collector_factory() {
     let factory = ExampleFactory::new();
     let mut db_opts = Options::default();
     let mut cf_opts = Options::default();
-    
+
     db_opts.create_if_missing(true);
     cf_opts.set_table_properties_collector_factory(factory);
 
     let path = DBPath::new("_rust_rocksdb_collectortest");
     let cf = ColumnFamilyDescriptor::new("default", cf_opts);
-    let db = DB::open_cf_descriptors(&db_opts, &path, vec![cf])
-        .unwrap();
+    let db = DB::open_cf_descriptors(&db_opts, &path, vec![cf]).unwrap();
 
     let samples = vec![
         (b"key1".to_vec(), b"value1".to_vec()),
@@ -167,13 +170,13 @@ fn test_table_properties_collector_factory() {
         db.put(k, v).unwrap();
         assert_eq!(v.as_slice(), &*db.get(k).unwrap().unwrap());
     }
-    
+
     // Verify the database operations worked
     assert_eq!(db.get(b"key1").unwrap().unwrap(), b"value1");
     assert_eq!(db.get(b"key2").unwrap().unwrap(), b"value2");
     assert_eq!(db.get(b"key3").unwrap().unwrap(), b"value3");
     assert_eq!(db.get(b"key4").unwrap().unwrap(), b"value4");
-    
+
     // Note: Flush operation triggers table properties collection
     // which may cause issues in some configurations. The basic
     // functionality is tested in other unit tests.
@@ -182,23 +185,23 @@ fn test_table_properties_collector_factory() {
 #[test]
 fn test_table_properties_collector_basic() {
     let mut collector = ExampleCollector::new();
-    
+
     // Test add method
     collector.add(b"key1", b"value1", DBEntryType::Put, 1, 100);
     collector.add(b"key2", b"value2", DBEntryType::Put, 2, 100);
     collector.add(b"key3", b"value3", DBEntryType::Delete, 3, 100);
     collector.add(b"key4", b"value4", DBEntryType::Merge, 4, 100);
-    
+
     // Test finish method
     let props = collector.finish();
-    
+
     // Verify properties
     let decoded = ExampleCollector::decode(&props);
     assert_eq!(decoded.num_keys, 4);
     assert_eq!(decoded.num_puts, 2);
     assert_eq!(decoded.num_merges, 1);
     assert_eq!(decoded.num_deletes, 1);
-    
+
     // Test name
     assert_eq!(collector.name().to_str().unwrap(), "example-collector");
 }
@@ -206,7 +209,7 @@ fn test_table_properties_collector_basic() {
 #[test]
 fn test_table_properties_collector_factory_basic() {
     let mut factory = ExampleFactory::new();
-    
+
     // Test create method
     let context = TablePropertiesCollectorContext {
         column_family_id: 0,
@@ -214,12 +217,12 @@ fn test_table_properties_collector_factory_basic() {
         num_levels: 7,
         last_level_inclusive_max_seqno_threshold: 0,
     };
-    
+
     let collector = factory.create(context);
-    
+
     // Verify collector is created
     assert_eq!(collector.name().to_str().unwrap(), "example-collector");
-    
+
     // Test factory name
     assert_eq!(factory.name().to_str().unwrap(), "example-factory");
 }
@@ -227,15 +230,15 @@ fn test_table_properties_collector_factory_basic() {
 #[test]
 fn test_table_properties_collector_duplicate_keys() {
     let mut collector = ExampleCollector::new();
-    
+
     // Add same key multiple times (simulating multiple versions)
     collector.add(b"key1", b"value1", DBEntryType::Put, 1, 100);
     collector.add(b"key1", b"value2", DBEntryType::Put, 2, 100);
     collector.add(b"key1", b"value3", DBEntryType::Put, 3, 100);
-    
+
     let props = collector.finish();
     let decoded = ExampleCollector::decode(&props);
-    
+
     // Should only count as one key
     assert_eq!(decoded.num_keys, 1);
     // But should count all puts
@@ -251,7 +254,7 @@ fn test_lifetimes() {
     let factory = ExampleFactory::new();
     let mut db_opts = Options::default();
     let mut cf_opts = Options::default();
-    
+
     db_opts.create_if_missing(true);
     // Set the factory - it will be moved into the options and managed
     // by reference counting internally
@@ -259,8 +262,7 @@ fn test_lifetimes() {
 
     let path = DBPath::new("_rust_rocksdb_table_properties_rc");
     let cf = ColumnFamilyDescriptor::new("default", cf_opts);
-    let db = DB::open_cf_descriptors(&db_opts, &path, vec![cf])
-        .unwrap();
+    let db = DB::open_cf_descriptors(&db_opts, &path, vec![cf]).unwrap();
 
     let samples = vec![
         (b"key1".to_vec(), b"value1".to_vec()),
@@ -274,13 +276,13 @@ fn test_lifetimes() {
         db.put(k, v).unwrap();
         assert_eq!(v.as_slice(), &*db.get(k).unwrap().unwrap());
     }
-    
+
     // Verify the database operations worked
     assert_eq!(db.get(b"key1").unwrap().unwrap(), b"value1");
     assert_eq!(db.get(b"key2").unwrap().unwrap(), b"value2");
     assert_eq!(db.get(b"key3").unwrap().unwrap(), b"value3");
     assert_eq!(db.get(b"key4").unwrap().unwrap(), b"value4");
-    
+
     // The factory and collectors are managed internally by RocksDB through
     // reference counting. When the database is dropped, all internal
     // references should be properly cleaned up without use-after-free errors.

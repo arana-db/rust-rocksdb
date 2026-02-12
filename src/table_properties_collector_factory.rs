@@ -64,9 +64,10 @@ pub struct TablePropertiesCollectorContext {
 impl TablePropertiesCollectorContext {
     unsafe fn from_raw(ptr: *mut ffi::rocksdb_table_properties_collector_context_t) -> Self {
         unsafe {
-            let column_family_id = 
+            let column_family_id =
                 ffi::rocksdb_tablepropertiescollectorcontext_column_family_id(ptr);
-            let level_at_creation = ffi::rocksdb_tablepropertiescollectorcontext_level_at_creation(ptr);
+            let level_at_creation =
+                ffi::rocksdb_tablepropertiescollectorcontext_level_at_creation(ptr);
             let num_levels = ffi::rocksdb_tablepropertiescollectorcontext_num_levels(ptr);
             let last_level_inclusive_max_seqno_threshold = ffi::rocksdb_tablepropertiescollectorcontext_last_level_inclusive_max_seqno_threshold(ptr);
 
@@ -86,7 +87,7 @@ pub unsafe extern "C" fn create_table_properties_collector_callback<F>(
 ) -> *mut ffi::rocksdb_table_properties_collector_t
 where
     F: TablePropertiesCollectorFactory,
-    <F as TablePropertiesCollectorFactory>::Collector: 'static,
+    <F as TablePropertiesCollectorFactory>::Collector: TablePropertiesCollector + 'static,
 {
     unsafe {
         let self_ = &mut *(raw_self as *mut F);
@@ -102,7 +103,7 @@ where
             Some(table_properties_collector::add_user_key_callback::<F::Collector>),
             None, // block_add callback (optional)
             Some(table_properties_collector::finish_callback::<F::Collector>),
-            None, // get_readable_properties callback (optional)
+            Some(table_properties_collector::get_readable_properties_callback::<F::Collector>),
             Some(table_properties_collector::name_callback::<F::Collector>),
             None, // need_compact callback (optional)
         )

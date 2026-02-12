@@ -60,57 +60,75 @@ pub trait TablePropertiesCollector {
     fn add(&mut self, key: &[u8], value: &[u8], entry_type: DBEntryType, seq: u64, file_size: u64);
     /// Will be called when a table has already been built and is ready for
     /// writing the properties block.
-    fn finish(&mut self, ) -> HashMap<Vec<u8>, Vec<u8>>;
+    fn finish(&mut self) -> HashMap<Vec<u8>, Vec<u8>>;
+    /// Returns user-collected properties formatted for human readability.
+    fn get_readable_properties(&self) -> HashMap<Vec<u8>, Vec<u8>> {
+        HashMap::default()
+    }
 }
 
 pub trait TablePropertiesCollectorAddUserKeyFn: FnMut(&[u8], &[u8], DBEntryType, u64, u64) {}
-impl<F> TablePropertiesCollectorAddUserKeyFn for F 
-where 
-    F: FnMut(&[u8], &[u8], DBEntryType, u64, u64) + Send + 'static 
-{}
+impl<F> TablePropertiesCollectorAddUserKeyFn for F where
+    F: FnMut(&[u8], &[u8], DBEntryType, u64, u64) + Send + 'static
+{
+}
 pub trait TablePropertiesCollectorFinishFn: FnMut() -> HashMap<Vec<u8>, Vec<u8>> {}
-impl<F> TablePropertiesCollectorFinishFn for F 
-where 
-    F: FnMut() -> HashMap<Vec<u8>, Vec<u8>> + Send + 'static 
-{}
+impl<F> TablePropertiesCollectorFinishFn for F where
+    F: FnMut() -> HashMap<Vec<u8>, Vec<u8>> + Send + 'static
+{
+}
+pub trait TablePropertiesCollectorGetReadablePropertiesFn:
+    Fn() -> HashMap<Vec<u8>, Vec<u8>>
+{
+}
+impl<F> TablePropertiesCollectorGetReadablePropertiesFn for F where
+    F: Fn() -> HashMap<Vec<u8>, Vec<u8>> + Send + 'static
+{
+}
 
-pub struct  TablePropertiesCollectorCallback<F, A>
-where 
-    F : TablePropertiesCollectorFinishFn,
-    A : TablePropertiesCollectorAddUserKeyFn,
+pub struct TablePropertiesCollectorCallback<F, A, R>
+where
+    F: TablePropertiesCollectorFinishFn,
+    A: TablePropertiesCollectorAddUserKeyFn,
+    R: TablePropertiesCollectorGetReadablePropertiesFn,
 {
     pub name: CString,
     pub add_fn: A,
     pub finish_fn: F,
+    pub get_readable_fn: R,
 }
 
-impl<F, A> TablePropertiesCollector for TablePropertiesCollectorCallback<F, A>
-where 
+impl<F, A, R> TablePropertiesCollector for TablePropertiesCollectorCallback<F, A, R>
+where
     F: TablePropertiesCollectorFinishFn,
     A: TablePropertiesCollectorAddUserKeyFn,
+    R: TablePropertiesCollectorGetReadablePropertiesFn,
 {
     fn name(&self) -> &CStr {
         self.name.as_c_str()
     }
 
     fn add(&mut self, key: &[u8], value: &[u8], entry_type: DBEntryType, seq: u64, file_size: u64) {
-        (self.add_fn)(key,value,entry_type,seq,file_size)
+        (self.add_fn)(key, value, entry_type, seq, file_size);
     }
 
     fn finish(&mut self) -> HashMap<Vec<u8>, Vec<u8>> {
         (self.finish_fn)()
     }
+
+    fn get_readable_properties(&self) -> HashMap<Vec<u8>, Vec<u8>> {
+        (self.get_readable_fn)()
+    }
 }
 
 pub unsafe extern "C" fn destructor_callback<F>(raw_cb: *mut c_void)
-where 
+where
     F: TablePropertiesCollector,
 {
     unsafe {
         drop(Box::from_raw(raw_cb as *mut F));
     }
 }
-
 
 pub unsafe extern "C" fn name_callback<F>(raw_cb: *mut c_void) -> *const c_char
 where
@@ -143,6 +161,26 @@ pub unsafe extern "C" fn finish_callback<T>(
     }
 }
 
+pub unsafe extern "C" fn get_readable_properties_callback<T>(
+    raw_self: *mut c_void,
+    props: *mut ffi::rocksdb_user_collected_properties_t,
+) where
+    T: TablePropertiesCollector,
+{
+    unsafe {
+        let self_ = &*(raw_self as *mut T);
+        for (key, value) in self_.get_readable_properties() {
+            ffi::rocksdb_user_collected_properties_add(
+                props,
+                key.as_ptr() as *const c_char,
+                key.len(),
+                value.as_ptr() as *const c_char,
+                value.len(),
+            );
+        }
+    }
+}
+
 pub unsafe extern "C" fn add_user_key_callback<T>(
     raw_self: *mut c_void,
     key: *const c_char,
@@ -158,22 +196,22 @@ pub unsafe extern "C" fn add_user_key_callback<T>(
 {
     unsafe {
         let self_ = &mut *(raw_self as *mut T);
-        
+
         let key_slice = slice::from_raw_parts(key as *const u8, key_len);
         let value_slice = slice::from_raw_parts(value as *const u8, value_len);
-        
-        let entry_type_val = if !entry_type.is_null() {
-            DBEntryType::from(*(entry_type as *const u8))
-        } else {
+
+        let entry_type_val = if entry_type.is_null() {
             DBEntryType::Other
-        };
-        
-        let seq_val = if !seq.is_null() {
-            *(seq as *const u64)
         } else {
-            0
+            DBEntryType::from(*(entry_type as *const u8))
         };
-        
+
+        let seq_val = if seq.is_null() {
+            0
+        } else {
+            *(seq as *const u64)
+        };
+
         self_.add(key_slice, value_slice, entry_type_val, seq_val, file_size);
     }
 }

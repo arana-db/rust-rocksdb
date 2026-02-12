@@ -50,7 +50,7 @@ struct rocksdb_table_properties_collector_t : public TablePropertiesCollector {
                           rocksdb_entry_type_t*, rocksdb_sequence_number_t*, uint64_t, char**);
     void (*block_add_)(void*, uint64_t, uint64_t, uint64_t);
     void (*finish_)(void*, rocksdb_user_collected_properties_t*, char**);
-    rocksdb_user_collected_properties_t* (*get_readable_properties_)(void*);
+    void (*get_readable_properties_)(void*, rocksdb_user_collected_properties_t*);
     const char* (*name_)(void*);
     bool (*need_compact_)(void*);
 
@@ -130,10 +130,10 @@ struct rocksdb_table_properties_collector_t : public TablePropertiesCollector {
 
     UserCollectedProperties GetReadableProperties() const override {
         if (get_readable_properties_) {
-            rocksdb_user_collected_properties_t* props = (*get_readable_properties_)(state_);
-            if (props) {
-                return props->rep;
-            }
+            rocksdb_user_collected_properties_t props_wrapper;
+            props_wrapper.rep.clear();
+            (*get_readable_properties_)(state_, &props_wrapper);
+            return props_wrapper.rep;
         }
         return collected_properties_;
     }

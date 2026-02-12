@@ -67,7 +67,7 @@ typedef void (*add_cb)(void*, const char* key, size_t key_len, const char* value
 typedef void (*add_user_key_cb)(void*, const char* key, size_t key_len, const char* value, size_t value_len, rocksdb_entry_type_t* entry_type, rocksdb_sequence_number_t* seq, uint64_t file_size, char**);
 typedef void (*block_add_cb)(void*, uint64_t, uint64_t, uint64_t);
 typedef void (*finish_cb)(void*, rocksdb_user_collected_properties_t* props, char**);
-typedef rocksdb_user_collected_properties_t* (*get_readable_properties_cb)(void*);
+typedef void (*get_readable_properties_cb)(void*, rocksdb_user_collected_properties_t* props);
 typedef const char* (*name_cb)(void*);
 typedef bool (*need_compact_cb)(void*);
 
