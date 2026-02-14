@@ -30,13 +30,18 @@ use std::time::Duration;
 use crate::column_family::ColumnFamilyTtl;
 use crate::ffi_util::CSlice;
 use crate::{
-    column_family::{AsColumnFamilyRef, BoundColumnFamily, UnboundColumnFamily},
+    column_family::{AsColumnFamilyRef, BoundColumnFamily, ColumnFamily, UnboundColumnFamily},
     db_options::{ImportColumnFamilyOptions, OptionsMustOutliveDB},
     ffi,
     ffi_util::{
         CStrLike, convert_rocksdb_error, from_cstr_and_free, from_cstr_without_free,
         opt_bytes_to_ptr, raw_data, to_cpath,
     },
+    ColumnFamilyDescriptor, CompactOptions, DBIteratorWithThreadMode, DBPinnableSlice,
+    DBRawIteratorWithThreadMode, DBWALIterator, Direction, Error, FlushOptions,
+    IngestExternalFileOptions, IteratorMode, Options, ReadOptions, SnapshotWithThreadMode,
+    WaitForCompactOptions, WriteBatch, WriteBatchWithIndex, WriteOptions,
+    DEFAULT_COLUMN_FAMILY_NAME,
 };
 use rust_librocksdb_sys::{
     rocksdb_livefile_destroy, rocksdb_livefile_t, rocksdb_livefiles_destroy, rocksdb_livefiles_t,

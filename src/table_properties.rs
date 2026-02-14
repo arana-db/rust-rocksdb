@@ -254,7 +254,7 @@ impl TableProperties {
         }
 
         let mut map = HashMap::new();
-        let iter = ffi::rocksdb_user_collected_properties_iter_create(props);
+        let iter = unsafe { ffi::rocksdb_user_collected_properties_iter_create(props) };
 
         loop {
             let mut key: *const libc::c_char = std::ptr::null();
@@ -262,22 +262,24 @@ impl TableProperties {
             let mut val: *const libc::c_char = std::ptr::null();
             let mut val_len: libc::size_t = 0;
 
-            if !ffi::rocksdb_user_collected_properties_iter_next(
-                iter,
-                &mut key,
-                &mut key_len,
-                &mut val,
-                &mut val_len,
-            ) {
+            if !unsafe {
+                ffi::rocksdb_user_collected_properties_iter_next(
+                    iter,
+                    &mut key,
+                    &mut key_len,
+                    &mut val,
+                    &mut val_len,
+                )
+            } {
                 break;
             }
 
-            let key_vec = std::slice::from_raw_parts(key as *const u8, key_len).to_vec();
-            let val_vec = std::slice::from_raw_parts(val as *const u8, val_len).to_vec();
+            let key_vec = unsafe { std::slice::from_raw_parts(key as *const u8, key_len) }.to_vec();
+            let val_vec = unsafe { std::slice::from_raw_parts(val as *const u8, val_len) }.to_vec();
             map.insert(key_vec, val_vec);
         }
 
-        ffi::rocksdb_user_collected_properties_iter_destroy(iter);
+        unsafe { ffi::rocksdb_user_collected_properties_iter_destroy(iter) };
         map
     }
 }

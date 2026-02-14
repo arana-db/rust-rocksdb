@@ -42,24 +42,10 @@ struct rocksdb_entry_type_t;
 struct rocksdb_sequence_number_t;
 struct rocksdb_user_collected_properties_t;
 struct rocksdb_table_properties_collector_context_t;
-
-struct rocksdb_table_properties_t {
-    void* opaque;
-};
-
-struct rocksdb_table_properties_collection_t {
-    void* opaque;
-};
-
-struct rocksdb_table_properties_collection_iter_t {
-    void* opaque_iter;
-    void* opaque_end;
-};
-
-struct rocksdb_user_collected_properties_iter_t {
-    void* opaque_iter;
-    void* opaque_end;
-};
+struct rocksdb_table_properties_t;
+struct rocksdb_table_properties_collection_t;
+struct rocksdb_table_properties_collection_iter_t;
+struct rocksdb_user_collected_properties_iter_t;
 
 extern ROCKSDB_LIBRARY_API uint32_t
 rocksdb_tablepropertiescollectorcontext_column_family_id(

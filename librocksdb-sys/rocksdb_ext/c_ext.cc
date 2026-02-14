@@ -23,6 +23,33 @@ using ROCKSDB_NAMESPACE::SequenceNumber;
 using ROCKSDB_NAMESPACE::Slice;
 using ROCKSDB_NAMESPACE::Options;
 
+// Define structs with actual C++ types before extern "C" block
+struct rocksdb_t {
+    ROCKSDB_NAMESPACE::DB* rep;
+};
+
+struct rocksdb_column_family_handle_t {
+    ROCKSDB_NAMESPACE::ColumnFamilyHandle* rep;
+};
+
+struct rocksdb_table_properties_t {
+    std::shared_ptr<const ROCKSDB_NAMESPACE::TableProperties> rep;
+};
+
+struct rocksdb_table_properties_collection_t {
+    ROCKSDB_NAMESPACE::TablePropertiesCollection rep;
+};
+
+struct rocksdb_table_properties_collection_iter_t {
+    ROCKSDB_NAMESPACE::TablePropertiesCollection::const_iterator iter;
+    ROCKSDB_NAMESPACE::TablePropertiesCollection::const_iterator end;
+};
+
+struct rocksdb_user_collected_properties_iter_t {
+    ROCKSDB_NAMESPACE::UserCollectedProperties::const_iterator iter;
+    ROCKSDB_NAMESPACE::UserCollectedProperties::const_iterator end;
+};
+
 extern "C" {
 struct rocksdb_options_t {
     Options rep;
@@ -284,33 +311,6 @@ uint64_t rocksdb_tablepropertiescollectorcontext_last_level_inclusive_max_seqno_
     rocksdb_table_properties_collector_context_t* context) {
     return context->rep.last_level_inclusive_max_seqno_threshold;
 }
-
-// Re-declare structs from rocksdb/db/c.cc since they are not in a header
-struct rocksdb_t {
-    ROCKSDB_NAMESPACE::DB* rep;
-};
-
-struct rocksdb_column_family_handle_t {
-    ROCKSDB_NAMESPACE::ColumnFamilyHandle* rep;
-};
-
-struct rocksdb_table_properties_t {
-    std::shared_ptr<const ROCKSDB_NAMESPACE::TableProperties> rep;
-};
-
-struct rocksdb_table_properties_collection_t {
-    ROCKSDB_NAMESPACE::TablePropertiesCollection rep;
-};
-
-struct rocksdb_table_properties_collection_iter_t {
-    ROCKSDB_NAMESPACE::TablePropertiesCollection::const_iterator iter;
-    ROCKSDB_NAMESPACE::TablePropertiesCollection::const_iterator end;
-};
-
-struct rocksdb_user_collected_properties_iter_t {
-    ROCKSDB_NAMESPACE::UserCollectedProperties::const_iterator iter;
-    ROCKSDB_NAMESPACE::UserCollectedProperties::const_iterator end;
-};
 
 // Helper for error handling, matching SaveError in rocksdb/db/c.cc
 static bool SaveError(char** errptr, const ROCKSDB_NAMESPACE::Status& s) {
