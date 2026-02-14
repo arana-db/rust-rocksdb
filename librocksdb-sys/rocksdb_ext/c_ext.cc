@@ -6,11 +6,13 @@
 #include <string>
 #include <cstring>
 #include <memory>
+#include <cstdlib>
 
 #include "rocksdb/table_properties.h"
 #include "rocksdb/options.h"
 #include "rocksdb/types.h"
 #include "rocksdb/c.h"
+#include "rocksdb/db.h"
 
 using ROCKSDB_NAMESPACE::TablePropertiesCollector;
 using ROCKSDB_NAMESPACE::TablePropertiesCollectorFactory;
@@ -282,4 +284,179 @@ uint64_t rocksdb_tablepropertiescollectorcontext_last_level_inclusive_max_seqno_
     rocksdb_table_properties_collector_context_t* context) {
     return context->rep.last_level_inclusive_max_seqno_threshold;
 }
+
+// Re-declare structs from rocksdb/db/c.cc since they are not in a header
+struct rocksdb_t {
+    ROCKSDB_NAMESPACE::DB* rep;
+};
+
+struct rocksdb_column_family_handle_t {
+    ROCKSDB_NAMESPACE::ColumnFamilyHandle* rep;
+};
+
+struct rocksdb_table_properties_t {
+    std::shared_ptr<const ROCKSDB_NAMESPACE::TableProperties> rep;
+};
+
+struct rocksdb_table_properties_collection_t {
+    ROCKSDB_NAMESPACE::TablePropertiesCollection rep;
+};
+
+struct rocksdb_table_properties_collection_iter_t {
+    ROCKSDB_NAMESPACE::TablePropertiesCollection::const_iterator iter;
+    ROCKSDB_NAMESPACE::TablePropertiesCollection::const_iterator end;
+};
+
+struct rocksdb_user_collected_properties_iter_t {
+    ROCKSDB_NAMESPACE::UserCollectedProperties::const_iterator iter;
+    ROCKSDB_NAMESPACE::UserCollectedProperties::const_iterator end;
+};
+
+// Helper for error handling, matching SaveError in rocksdb/db/c.cc
+static bool SaveError(char** errptr, const ROCKSDB_NAMESPACE::Status& s) {
+    if (s.ok()) {
+        return false;
+    }
+    if (errptr != nullptr) {
+        if (*errptr != nullptr) {
+            free(*errptr);
+        }
+        *errptr = strdup(s.ToString().c_str());
+    }
+    return true;
+}
+
+rocksdb_table_properties_collection_t* rocksdb_get_properties_of_all_tables(rocksdb_t* db, char** errptr) {
+    auto coll = new rocksdb_table_properties_collection_t;
+    if (SaveError(errptr, db->rep->GetPropertiesOfAllTables(&coll->rep))) {
+        delete coll;
+        return nullptr;
+    }
+    return coll;
+}
+
+rocksdb_table_properties_collection_t* rocksdb_get_properties_of_all_tables_cf(rocksdb_t* db, rocksdb_column_family_handle_t* column_family, char** errptr) {
+    auto coll = new rocksdb_table_properties_collection_t;
+    if (SaveError(errptr, db->rep->GetPropertiesOfAllTables(column_family->rep, &coll->rep))) {
+        delete coll;
+        return nullptr;
+    }
+    return coll;
+}
+
+void rocksdb_table_properties_collection_destroy(rocksdb_table_properties_collection_t* collection) {
+    delete collection;
+}
+
+size_t rocksdb_table_properties_collection_len(rocksdb_table_properties_collection_t* collection) {
+    return collection->rep.size();
+}
+
+rocksdb_table_properties_collection_iter_t* rocksdb_table_properties_collection_iter_create(rocksdb_table_properties_collection_t* collection) {
+    auto iter = new rocksdb_table_properties_collection_iter_t;
+    iter->iter = collection->rep.begin();
+    iter->end = collection->rep.end();
+    return iter;
+}
+
+void rocksdb_table_properties_collection_iter_destroy(rocksdb_table_properties_collection_iter_t* iter) {
+    delete iter;
+}
+
+bool rocksdb_table_properties_collection_iter_next(rocksdb_table_properties_collection_iter_t* iter, const char** key, size_t* key_len, rocksdb_table_properties_t** props) {
+    if (iter->iter == iter->end) {
+        return false;
+    }
+    *key = iter->iter->first.c_str();
+    *key_len = iter->iter->first.size();
+    *props = new rocksdb_table_properties_t;
+    (*props)->rep = iter->iter->second;
+    iter->iter++;
+    return true;
+}
+
+void rocksdb_table_properties_destroy(rocksdb_table_properties_t* props) {
+    delete props;
+}
+
+uint64_t rocksdb_table_properties_get_data_size(const rocksdb_table_properties_t* props) {
+    return props->rep->data_size;
+}
+
+uint64_t rocksdb_table_properties_get_index_size(const rocksdb_table_properties_t* props) {
+    return props->rep->index_size;
+}
+
+uint64_t rocksdb_table_properties_get_filter_size(const rocksdb_table_properties_t* props) {
+    return props->rep->filter_size;
+}
+
+uint64_t rocksdb_table_properties_get_raw_key_size(const rocksdb_table_properties_t* props) {
+    return props->rep->raw_key_size;
+}
+
+uint64_t rocksdb_table_properties_get_raw_value_size(const rocksdb_table_properties_t* props) {
+    return props->rep->raw_value_size;
+}
+
+uint64_t rocksdb_table_properties_get_num_data_blocks(const rocksdb_table_properties_t* props) {
+    return props->rep->num_data_blocks;
+}
+
+uint64_t rocksdb_table_properties_get_num_entries(const rocksdb_table_properties_t* props) {
+    return props->rep->num_entries;
+}
+
+uint64_t rocksdb_table_properties_get_num_deletions(const rocksdb_table_properties_t* props) {
+    return props->rep->num_deletions;
+}
+
+uint64_t rocksdb_table_properties_get_num_merge_operands(const rocksdb_table_properties_t* props) {
+    return props->rep->num_merge_operands;
+}
+
+uint64_t rocksdb_table_properties_get_num_range_deletions(const rocksdb_table_properties_t* props) {
+    return props->rep->num_range_deletions;
+}
+
+const rocksdb_user_collected_properties_t*
+rocksdb_table_properties_get_user_collected_properties(const rocksdb_table_properties_t* props) {
+    // We cannot just cast because rocksdb_user_collected_properties_t might have a different layout
+    // Actually rocksdb_user_collected_properties_t is defined as { UserCollectedProperties rep; }
+    // So we can return a pointer to the member if we are careful about lifetimes.
+    // However, to be safe and match the style of other bindings, we return an opaque pointer.
+    return reinterpret_cast<const rocksdb_user_collected_properties_t*>(&props->rep->user_collected_properties);
+}
+
+const rocksdb_user_collected_properties_t*
+rocksdb_table_properties_get_readable_properties(const rocksdb_table_properties_t* props) {
+    return reinterpret_cast<const rocksdb_user_collected_properties_t*>(&props->rep->readable_properties);
+}
+
+rocksdb_user_collected_properties_iter_t*
+rocksdb_user_collected_properties_iter_create(const rocksdb_user_collected_properties_t* props) {
+    auto iter = new rocksdb_user_collected_properties_iter_t;
+    // Safety: we know rocksdb_user_collected_properties_t wraps UserCollectedProperties
+    const auto& map = *reinterpret_cast<const ROCKSDB_NAMESPACE::UserCollectedProperties*>(props);
+    iter->iter = map.begin();
+    iter->end = map.end();
+    return iter;
+}
+
+void rocksdb_user_collected_properties_iter_destroy(rocksdb_user_collected_properties_iter_t* iter) {
+    delete iter;
+}
+
+bool rocksdb_user_collected_properties_iter_next(rocksdb_user_collected_properties_iter_t* iter, const char** key, size_t* key_len, const char** val, size_t* val_len) {
+    if (iter->iter == iter->end) {
+        return false;
+    }
+    *key = iter->iter->first.data();
+    *key_len = iter->iter->first.size();
+    *val = iter->iter->second.data();
+    *val_len = iter->iter->second.size();
+    iter->iter++;
+    return true;
+}
+
 }  // extern "C"

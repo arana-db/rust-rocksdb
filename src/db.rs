@@ -30,10 +30,6 @@ use std::time::Duration;
 use crate::column_family::ColumnFamilyTtl;
 use crate::ffi_util::CSlice;
 use crate::{
-    ColumnFamily, ColumnFamilyDescriptor, CompactOptions, DBIteratorWithThreadMode,
-    DBPinnableSlice, DBRawIteratorWithThreadMode, DBWALIterator, DEFAULT_COLUMN_FAMILY_NAME,
-    Direction, Error, FlushOptions, IngestExternalFileOptions, IteratorMode, Options, ReadOptions,
-    SnapshotWithThreadMode, WaitForCompactOptions, WriteBatch, WriteBatchWithIndex, WriteOptions,
     column_family::{AsColumnFamilyRef, BoundColumnFamily, UnboundColumnFamily},
     db_options::{ImportColumnFamilyOptions, OptionsMustOutliveDB},
     ffi,
@@ -3054,6 +3050,39 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
             },
             Self::parse_property_int_value,
         )
+    }
+
+    /// Get properties for all tables in the default column family.
+    pub fn get_properties_of_all_tables(
+        &self,
+    ) -> Result<crate::table_properties::TablePropertiesCollection, Error> {
+        unsafe {
+            let mut err: *mut c_char = ptr::null_mut();
+            let result = ffi::rocksdb_get_properties_of_all_tables(self.inner.inner(), &mut err);
+            if !err.is_null() {
+                return Err(Error::new(from_cstr_and_free(err)));
+            }
+            Ok(crate::table_properties::TablePropertiesCollection::from_raw(result))
+        }
+    }
+
+    /// Get properties for all tables in the given column family.
+    pub fn get_properties_of_all_tables_cf(
+        &self,
+        cf: &impl AsColumnFamilyRef,
+    ) -> Result<crate::table_properties::TablePropertiesCollection, Error> {
+        unsafe {
+            let mut err: *mut c_char = ptr::null_mut();
+            let result = ffi::rocksdb_get_properties_of_all_tables_cf(
+                self.inner.inner(),
+                cf.inner(),
+                &mut err,
+            );
+            if !err.is_null() {
+                return Err(Error::new(from_cstr_and_free(err)));
+            }
+            Ok(crate::table_properties::TablePropertiesCollection::from_raw(result))
+        }
     }
 
     /// The sequence number of the most recent transaction.

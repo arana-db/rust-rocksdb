@@ -25,15 +25,41 @@
 extern "C" {
 #endif
 
-/* Table Properties Collector Factory */
 typedef struct rocksdb_table_properties_collector_t rocksdb_table_properties_collector_t;
 typedef struct rocksdb_table_properties_collector_factory_t rocksdb_table_properties_collector_factory_t;
 typedef struct rocksdb_entry_type_t rocksdb_entry_type_t;
 typedef struct rocksdb_sequence_number_t rocksdb_sequence_number_t;
 typedef struct rocksdb_user_collected_properties_t rocksdb_user_collected_properties_t;
+typedef struct rocksdb_table_properties_collector_context_t rocksdb_table_properties_collector_context_t;
+typedef struct rocksdb_table_properties_t rocksdb_table_properties_t;
+typedef struct rocksdb_table_properties_collection_t rocksdb_table_properties_collection_t;
+typedef struct rocksdb_table_properties_collection_iter_t rocksdb_table_properties_collection_iter_t;
+typedef struct rocksdb_user_collected_properties_iter_t rocksdb_user_collected_properties_iter_t;
 
-typedef struct rocksdb_table_properties_collector_context_t
-    rocksdb_table_properties_collector_context_t;
+struct rocksdb_table_properties_collector_t;
+struct rocksdb_table_properties_collector_factory_t;
+struct rocksdb_entry_type_t;
+struct rocksdb_sequence_number_t;
+struct rocksdb_user_collected_properties_t;
+struct rocksdb_table_properties_collector_context_t;
+
+struct rocksdb_table_properties_t {
+    void* opaque;
+};
+
+struct rocksdb_table_properties_collection_t {
+    void* opaque;
+};
+
+struct rocksdb_table_properties_collection_iter_t {
+    void* opaque_iter;
+    void* opaque_end;
+};
+
+struct rocksdb_user_collected_properties_iter_t {
+    void* opaque_iter;
+    void* opaque_end;
+};
 
 extern ROCKSDB_LIBRARY_API uint32_t
 rocksdb_tablepropertiescollectorcontext_column_family_id(
@@ -115,6 +141,60 @@ rocksdb_user_collected_properties_add(
 extern ROCKSDB_LIBRARY_API void
 rocksdb_user_collected_properties_clear(
     rocksdb_user_collected_properties_t* props);
+
+extern ROCKSDB_LIBRARY_API rocksdb_table_properties_collection_t*
+rocksdb_get_properties_of_all_tables(rocksdb_t* db, char** errptr);
+
+extern ROCKSDB_LIBRARY_API rocksdb_table_properties_collection_t*
+rocksdb_get_properties_of_all_tables_cf(rocksdb_t* db, rocksdb_column_family_handle_t* column_family, char** errptr);
+
+extern ROCKSDB_LIBRARY_API void
+rocksdb_table_properties_collection_destroy(rocksdb_table_properties_collection_t* collection);
+
+extern ROCKSDB_LIBRARY_API size_t
+rocksdb_table_properties_collection_len(rocksdb_table_properties_collection_t* collection);
+
+extern ROCKSDB_LIBRARY_API rocksdb_table_properties_collection_iter_t*
+rocksdb_table_properties_collection_iter_create(rocksdb_table_properties_collection_t* collection);
+
+extern ROCKSDB_LIBRARY_API void
+rocksdb_table_properties_collection_iter_destroy(rocksdb_table_properties_collection_iter_t* iter);
+
+extern ROCKSDB_LIBRARY_API bool
+rocksdb_table_properties_collection_iter_next(rocksdb_table_properties_collection_iter_t* iter,
+                                              const char** key, size_t* key_len,
+                                              rocksdb_table_properties_t** props);
+
+extern ROCKSDB_LIBRARY_API void
+rocksdb_table_properties_destroy(rocksdb_table_properties_t* props);
+
+extern ROCKSDB_LIBRARY_API uint64_t rocksdb_table_properties_get_data_size(const rocksdb_table_properties_t* props);
+extern ROCKSDB_LIBRARY_API uint64_t rocksdb_table_properties_get_index_size(const rocksdb_table_properties_t* props);
+extern ROCKSDB_LIBRARY_API uint64_t rocksdb_table_properties_get_filter_size(const rocksdb_table_properties_t* props);
+extern ROCKSDB_LIBRARY_API uint64_t rocksdb_table_properties_get_raw_key_size(const rocksdb_table_properties_t* props);
+extern ROCKSDB_LIBRARY_API uint64_t rocksdb_table_properties_get_raw_value_size(const rocksdb_table_properties_t* props);
+extern ROCKSDB_LIBRARY_API uint64_t rocksdb_table_properties_get_num_data_blocks(const rocksdb_table_properties_t* props);
+extern ROCKSDB_LIBRARY_API uint64_t rocksdb_table_properties_get_num_entries(const rocksdb_table_properties_t* props);
+extern ROCKSDB_LIBRARY_API uint64_t rocksdb_table_properties_get_num_deletions(const rocksdb_table_properties_t* props);
+extern ROCKSDB_LIBRARY_API uint64_t rocksdb_table_properties_get_num_merge_operands(const rocksdb_table_properties_t* props);
+extern ROCKSDB_LIBRARY_API uint64_t rocksdb_table_properties_get_num_range_deletions(const rocksdb_table_properties_t* props);
+
+extern ROCKSDB_LIBRARY_API const rocksdb_user_collected_properties_t*
+rocksdb_table_properties_get_user_collected_properties(const rocksdb_table_properties_t* props);
+
+extern ROCKSDB_LIBRARY_API const rocksdb_user_collected_properties_t*
+rocksdb_table_properties_get_readable_properties(const rocksdb_table_properties_t* props);
+
+extern ROCKSDB_LIBRARY_API rocksdb_user_collected_properties_iter_t*
+rocksdb_user_collected_properties_iter_create(const rocksdb_user_collected_properties_t* props);
+
+extern ROCKSDB_LIBRARY_API void
+rocksdb_user_collected_properties_iter_destroy(rocksdb_user_collected_properties_iter_t* iter);
+
+extern ROCKSDB_LIBRARY_API bool
+rocksdb_user_collected_properties_iter_next(rocksdb_user_collected_properties_iter_t* iter,
+                                            const char** key, size_t* key_len,
+                                            const char** val, size_t* val_len);
 
 #ifdef __cplusplus
 }

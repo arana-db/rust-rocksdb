@@ -107,6 +107,7 @@ mod snapshot;
 pub mod sst_file_manager;
 mod sst_file_writer;
 pub mod statistics;
+pub mod table_properties;
 pub mod table_properties_collector;
 pub mod table_properties_collector_factory;
 mod transactions;
@@ -148,6 +149,7 @@ pub use crate::{
     snapshot::{Snapshot, SnapshotWithThreadMode},
     sst_file_manager::SstFileManager,
     sst_file_writer::SstFileWriter,
+    table_properties::{TableProperties, TablePropertiesCollection},
     transactions::{
         OptimisticTransactionDB, OptimisticTransactionOptions, Transaction, TransactionDB,
         TransactionDBOptions, TransactionOptions,
