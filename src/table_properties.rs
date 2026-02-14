@@ -297,7 +297,6 @@ unsafe impl Sync for TableProperties {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{DB, Options};
     use tempfile::Builder;
 

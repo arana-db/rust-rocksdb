@@ -16,7 +16,7 @@ mod util;
 
 use std::collections::HashMap;
 
-use rust_rocksdb::{DB, Options, TableProperties, TablePropertiesCollection};
+use rust_rocksdb::{DB, Options};
 use util::DBPath;
 
 /// Test that we can get properties for all tables after flushing data
@@ -57,7 +57,6 @@ fn test_get_properties_of_all_tables_basic() {
 
         // Verify numeric properties are reasonable
         assert!(props.data_size() > 0, "Data size should be > 0");
-        assert!(props.num_entries() >= 0, "Num entries should be >= 0");
     }
 
     assert!(found_entries, "Expected to find at least one entry");
@@ -70,15 +69,17 @@ fn test_get_properties_of_all_tables_cf() {
 
     let mut opts = Options::default();
     opts.create_if_missing(true);
+    opts.create_missing_column_families(true);
 
-    let db = DB::open(&opts, &path).unwrap();
+    // Open database with a custom column family
+    let db = DB::open_cf(&opts, &path, ["cf1"]).unwrap();
 
-    // Write data and flush
-    db.put(b"key1", b"value1").unwrap();
-    db.flush().unwrap();
+    // Get column family handle
+    let cf = db.cf_handle("cf1").unwrap();
 
-    // Get default column family handle
-    let cf = db.cf_handle("default").unwrap();
+    // Write data to the column family and flush
+    db.put_cf(&cf, b"key1", b"value1").unwrap();
+    db.flush_cf(&cf).unwrap();
 
     // Get properties for the column family
     let collection = db.get_properties_of_all_tables_cf(&cf).unwrap();
