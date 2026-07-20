@@ -164,6 +164,94 @@ extern ROCKSDB_LIBRARY_API void rust_rocksdb_eventlistener_destroy(
 extern ROCKSDB_LIBRARY_API void rust_rocksdb_options_add_eventlistener(
     rocksdb_options_t*, rust_rocksdb_eventlistener_t*);
 
+/* -------------------------------------------------------------------------
+ * DB::GetPropertiesOfAllTables
+ *
+ * Exposes RocksDB's per-SST TablePropertiesCollection without modifying the
+ * vendored RocksDB C API. File names and user properties are length-delimited
+ * byte strings; no UTF-8 or NUL-termination assumptions are made.
+ * ------------------------------------------------------------------------- */
+typedef struct rust_rocksdb_table_properties_collection_t
+    rust_rocksdb_table_properties_collection_t;
+typedef struct rust_rocksdb_table_properties_collection_iter_t
+    rust_rocksdb_table_properties_collection_iter_t;
+typedef struct rust_rocksdb_table_properties_t
+    rust_rocksdb_table_properties_t;
+typedef struct rust_rocksdb_user_collected_properties_iter_t
+    rust_rocksdb_user_collected_properties_iter_t;
+
+#ifdef __cplusplus
+#define RUST_ROCKSDB_NOEXCEPT noexcept
+#else
+#define RUST_ROCKSDB_NOEXCEPT
+#endif
+
+extern ROCKSDB_LIBRARY_API rust_rocksdb_table_properties_collection_t*
+rust_rocksdb_get_properties_of_all_tables(rocksdb_t*, char**)
+    RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API rust_rocksdb_table_properties_collection_t*
+rust_rocksdb_get_properties_of_all_tables_cf(
+    rocksdb_t*, rocksdb_column_family_handle_t*, char**)
+    RUST_ROCKSDB_NOEXCEPT;
+
+extern ROCKSDB_LIBRARY_API void
+rust_rocksdb_table_properties_collection_destroy(
+    rust_rocksdb_table_properties_collection_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API size_t
+rust_rocksdb_table_properties_collection_len(
+    const rust_rocksdb_table_properties_collection_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API rust_rocksdb_table_properties_collection_iter_t*
+rust_rocksdb_table_properties_collection_iter_create(
+    const rust_rocksdb_table_properties_collection_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API void
+rust_rocksdb_table_properties_collection_iter_destroy(
+    rust_rocksdb_table_properties_collection_iter_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API unsigned char
+rust_rocksdb_table_properties_collection_iter_next(
+    rust_rocksdb_table_properties_collection_iter_t*, const char**, size_t*,
+    rust_rocksdb_table_properties_t**) RUST_ROCKSDB_NOEXCEPT;
+
+extern ROCKSDB_LIBRARY_API void rust_rocksdb_table_properties_destroy(
+    rust_rocksdb_table_properties_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API uint64_t rust_rocksdb_table_properties_data_size(
+    const rust_rocksdb_table_properties_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API uint64_t rust_rocksdb_table_properties_index_size(
+    const rust_rocksdb_table_properties_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API uint64_t rust_rocksdb_table_properties_filter_size(
+    const rust_rocksdb_table_properties_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API uint64_t rust_rocksdb_table_properties_raw_key_size(
+    const rust_rocksdb_table_properties_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API uint64_t rust_rocksdb_table_properties_raw_value_size(
+    const rust_rocksdb_table_properties_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API uint64_t rust_rocksdb_table_properties_num_data_blocks(
+    const rust_rocksdb_table_properties_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API uint64_t rust_rocksdb_table_properties_num_entries(
+    const rust_rocksdb_table_properties_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API uint64_t rust_rocksdb_table_properties_num_deletions(
+    const rust_rocksdb_table_properties_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API uint64_t
+rust_rocksdb_table_properties_num_merge_operands(
+    const rust_rocksdb_table_properties_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API uint64_t
+rust_rocksdb_table_properties_num_range_deletions(
+    const rust_rocksdb_table_properties_t*) RUST_ROCKSDB_NOEXCEPT;
+
+extern ROCKSDB_LIBRARY_API rust_rocksdb_user_collected_properties_iter_t*
+rust_rocksdb_table_properties_user_collected_properties_iter_create(
+    const rust_rocksdb_table_properties_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API rust_rocksdb_user_collected_properties_iter_t*
+rust_rocksdb_table_properties_readable_properties_iter_create(
+    const rust_rocksdb_table_properties_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API void
+rust_rocksdb_user_collected_properties_iter_destroy(
+    rust_rocksdb_user_collected_properties_iter_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API unsigned char
+rust_rocksdb_user_collected_properties_iter_next(
+    rust_rocksdb_user_collected_properties_iter_t*, const char**, size_t*,
+    const char**, size_t*) RUST_ROCKSDB_NOEXCEPT;
+
+#undef RUST_ROCKSDB_NOEXCEPT
+
 #ifdef __cplusplus
 }
 #endif

@@ -33,7 +33,8 @@ use crate::{
     ColumnFamily, ColumnFamilyDescriptor, CompactOptions, DBIteratorWithThreadMode,
     DBPinnableSlice, DBRawIteratorWithThreadMode, DBWALIterator, DEFAULT_COLUMN_FAMILY_NAME,
     Direction, Error, FlushOptions, IngestExternalFileOptions, IteratorMode, Options, ReadOptions,
-    SnapshotWithThreadMode, WaitForCompactOptions, WriteBatch, WriteBatchWithIndex, WriteOptions,
+    SnapshotWithThreadMode, TablePropertiesCollection, WaitForCompactOptions, WriteBatch,
+    WriteBatchWithIndex, WriteOptions,
     column_family::{AsColumnFamilyRef, BoundColumnFamily, UnboundColumnFamily},
     db_options::{ImportColumnFamilyOptions, OptionsMustOutliveDB},
     ffi,
@@ -3071,6 +3072,30 @@ impl<T: ThreadMode, D: DBInner> DBCommon<T, D> {
             },
             Self::parse_property_int_value,
         )
+    }
+
+    /// Returns the properties of every SST file in the default column family.
+    pub fn get_properties_of_all_tables(&self) -> Result<TablePropertiesCollection, Error> {
+        unsafe {
+            let collection = ffi_try!(ffi::rust_rocksdb_get_properties_of_all_tables(
+                self.inner.inner()
+            ));
+            TablePropertiesCollection::from_raw(collection)
+        }
+    }
+
+    /// Returns the properties of every SST file in a specific column family.
+    pub fn get_properties_of_all_tables_cf(
+        &self,
+        cf: &impl AsColumnFamilyRef,
+    ) -> Result<TablePropertiesCollection, Error> {
+        unsafe {
+            let collection = ffi_try!(ffi::rust_rocksdb_get_properties_of_all_tables_cf(
+                self.inner.inner(),
+                cf.inner()
+            ));
+            TablePropertiesCollection::from_raw(collection)
+        }
     }
 
     /// The sequence number of the most recent transaction.

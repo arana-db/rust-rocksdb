@@ -107,6 +107,7 @@ mod snapshot;
 pub mod sst_file_manager;
 mod sst_file_writer;
 pub mod statistics;
+pub mod table_properties;
 mod transactions;
 mod write_batch;
 mod write_batch_with_index;
@@ -147,6 +148,10 @@ pub use crate::{
     snapshot::{Snapshot, SnapshotWithThreadMode},
     sst_file_manager::SstFileManager,
     sst_file_writer::SstFileWriter,
+    table_properties::{
+        TableProperties, TablePropertiesCollection, TablePropertiesCollectionIntoIter,
+        TablePropertiesCollectionIter,
+    },
     transactions::{
         OptimisticTransactionDB, OptimisticTransactionOptions, Transaction, TransactionDB,
         TransactionDBOptions, TransactionOptions,
