@@ -492,7 +492,17 @@ typedef struct rust_rocksdb_table_properties_t
     rust_rocksdb_table_properties_t;
 typedef struct rust_rocksdb_user_collected_properties_iter_t
     rust_rocksdb_user_collected_properties_iter_t;
+
+#ifdef __cplusplus
+#define RUST_ROCKSDB_NOEXCEPT noexcept
+#else
+#define RUST_ROCKSDB_NOEXCEPT
+#endif
 ```
+
+以下所有新增声明和对应 C++ 定义都必须使用同一异常规范；不得只在 `.cc`
+定义上增加 `noexcept`，否则 C++ 编译单元看到的声明与定义不一致。header 的
+新增声明区结束后执行 `#undef RUST_ROCKSDB_NOEXCEPT`。
 
 - [ ] **步骤 2：声明 DB 和 collection API**
 
@@ -500,32 +510,35 @@ typedef struct rust_rocksdb_user_collected_properties_iter_t
 
 ```c
 extern ROCKSDB_LIBRARY_API rust_rocksdb_table_properties_collection_t*
-rust_rocksdb_get_properties_of_all_tables(rocksdb_t*, char**);
+rust_rocksdb_get_properties_of_all_tables(rocksdb_t*, char**)
+    RUST_ROCKSDB_NOEXCEPT;
 
 extern ROCKSDB_LIBRARY_API rust_rocksdb_table_properties_collection_t*
 rust_rocksdb_get_properties_of_all_tables_cf(
-    rocksdb_t*, rocksdb_column_family_handle_t*, char**);
+    rocksdb_t*, rocksdb_column_family_handle_t*, char**)
+    RUST_ROCKSDB_NOEXCEPT;
 
 extern ROCKSDB_LIBRARY_API void
 rust_rocksdb_table_properties_collection_destroy(
-    rust_rocksdb_table_properties_collection_t*);
+    rust_rocksdb_table_properties_collection_t*) RUST_ROCKSDB_NOEXCEPT;
 
 extern ROCKSDB_LIBRARY_API size_t
 rust_rocksdb_table_properties_collection_len(
-    const rust_rocksdb_table_properties_collection_t*);
+    const rust_rocksdb_table_properties_collection_t*) RUST_ROCKSDB_NOEXCEPT;
 
 extern ROCKSDB_LIBRARY_API rust_rocksdb_table_properties_collection_iter_t*
 rust_rocksdb_table_properties_collection_iter_create(
-    const rust_rocksdb_table_properties_collection_t*);
+    const rust_rocksdb_table_properties_collection_t*) RUST_ROCKSDB_NOEXCEPT;
 
 extern ROCKSDB_LIBRARY_API void
 rust_rocksdb_table_properties_collection_iter_destroy(
-    rust_rocksdb_table_properties_collection_iter_t*);
+    rust_rocksdb_table_properties_collection_iter_t*) RUST_ROCKSDB_NOEXCEPT;
 
 extern ROCKSDB_LIBRARY_API unsigned char
 rust_rocksdb_table_properties_collection_iter_next(
     rust_rocksdb_table_properties_collection_iter_t*,
-    const char**, size_t*, rust_rocksdb_table_properties_t**);
+    const char**, size_t*, rust_rocksdb_table_properties_t**)
+    RUST_ROCKSDB_NOEXCEPT;
 ```
 
 - [ ] **步骤 3：声明单表 numeric 和 map iterator API**
@@ -571,11 +584,16 @@ rust_rocksdb_user_collected_properties_iter_next(
     const char**, size_t*, const char**, size_t*);
 ```
 
+上述 numeric、map iterator create/destroy/next 声明也全部追加
+`RUST_ROCKSDB_NOEXCEPT`；对应 `.cc` 定义全部显式标记 `noexcept`。
+
 - [ ] **步骤 4：在 C++ 文件增加 includes 和 type aliases**
 
 增加：
 
 ```cpp
+#include <cstdlib>
+#include <new>
 #include <unordered_map>
 #include <utility>
 
@@ -619,9 +637,36 @@ static ColumnFamilyHandle* RustColumnFamilyHandle(
     rocksdb_column_family_handle_t* column_family) {
   return *reinterpret_cast<ColumnFamilyHandle**>(column_family);
 }
+
+template <typename T, typename... Args>
+static T* RustNewOrAbort(Args&&... args) noexcept {
+  T* value = new (std::nothrow) T{std::forward<Args>(args)...};
+  if (value == nullptr) {
+    std::abort();
+  }
+  return value;
+}
+
+static void RustSaveStaticError(char** errptr, const char* message) noexcept {
+  assert(errptr != nullptr);
+  const size_t length = std::strlen(message);
+  char* copy = static_cast<char*>(std::malloc(length + 1));
+  if (copy != nullptr) {
+    std::memcpy(copy, message, length + 1);
+  }
+  if (*errptr != nullptr) {
+    std::free(*errptr);
+  }
+  *errptr = copy;
+}
 ```
 
 在相邻注释中记录布局证据：RocksDB `db/c.cc` 的 `rocksdb_t` 第一字段为 `DB* rep`，`rocksdb_column_family_handle_t` 第一字段为 `ColumnFamilyHandle* rep`。该假设必须由集成测试覆盖。
+
+`RustNewOrAbort` 是这个兼容层的明确 OOM 策略：与 Rust 默认分配器一致，
+不可恢复的 handle 分配失败会终止进程；不得让 C++ 异常跨越 C ABI，也不得把
+分配失败伪装为迭代结束。能够通过现有 `Result` 返回的 DB 查询入口则必须捕获
+所有 C++ 异常并返回错误。
 
 - [ ] **步骤 6：实现默认 CF 和指定 CF 查询**
 
@@ -629,28 +674,47 @@ static ColumnFamilyHandle* RustColumnFamilyHandle(
 
 ```cpp
 extern "C" rust_rocksdb_table_properties_collection_t*
-rust_rocksdb_get_properties_of_all_tables(rocksdb_t* db, char** errptr) {
-  auto collection =
-      std::make_unique<rust_rocksdb_table_properties_collection_t>();
-  Status status = RustDB(db)->GetPropertiesOfAllTables(&collection->rep);
-  if (RustSaveError(errptr, status)) {
+rust_rocksdb_get_properties_of_all_tables(rocksdb_t* db,
+                                           char** errptr) noexcept {
+  auto* raw = new (std::nothrow) rust_rocksdb_table_properties_collection_t();
+  if (raw == nullptr) {
+    RustSaveStaticError(errptr, "failed to allocate table properties collection");
     return nullptr;
   }
-  return collection.release();
+  std::unique_ptr<rust_rocksdb_table_properties_collection_t> collection(raw);
+  try {
+    Status status = RustDB(db)->GetPropertiesOfAllTables(&collection->rep);
+    if (RustSaveError(errptr, status)) {
+      return nullptr;
+    }
+    return collection.release();
+  } catch (...) {
+    RustSaveStaticError(errptr, "exception while reading table properties");
+    return nullptr;
+  }
 }
 
 extern "C" rust_rocksdb_table_properties_collection_t*
 rust_rocksdb_get_properties_of_all_tables_cf(
     rocksdb_t* db, rocksdb_column_family_handle_t* column_family,
-    char** errptr) {
-  auto collection =
-      std::make_unique<rust_rocksdb_table_properties_collection_t>();
-  Status status = RustDB(db)->GetPropertiesOfAllTables(
-      RustColumnFamilyHandle(column_family), &collection->rep);
-  if (RustSaveError(errptr, status)) {
+    char** errptr) noexcept {
+  auto* raw = new (std::nothrow) rust_rocksdb_table_properties_collection_t();
+  if (raw == nullptr) {
+    RustSaveStaticError(errptr, "failed to allocate table properties collection");
     return nullptr;
   }
-  return collection.release();
+  std::unique_ptr<rust_rocksdb_table_properties_collection_t> collection(raw);
+  try {
+    Status status = RustDB(db)->GetPropertiesOfAllTables(
+        RustColumnFamilyHandle(column_family), &collection->rep);
+    if (RustSaveError(errptr, status)) {
+      return nullptr;
+    }
+    return collection.release();
+  } catch (...) {
+    RustSaveStaticError(errptr, "exception while reading table properties");
+    return nullptr;
+  }
 }
 ```
 
@@ -660,24 +724,24 @@ rust_rocksdb_get_properties_of_all_tables_cf(
 
 ```cpp
 extern "C" void rust_rocksdb_table_properties_collection_destroy(
-    rust_rocksdb_table_properties_collection_t* collection) {
+    rust_rocksdb_table_properties_collection_t* collection) noexcept {
   delete collection;
 }
 
 extern "C" size_t rust_rocksdb_table_properties_collection_len(
-    const rust_rocksdb_table_properties_collection_t* collection) {
+    const rust_rocksdb_table_properties_collection_t* collection) noexcept {
   return collection->rep.size();
 }
 
 extern "C" rust_rocksdb_table_properties_collection_iter_t*
 rust_rocksdb_table_properties_collection_iter_create(
-    const rust_rocksdb_table_properties_collection_t* collection) {
-  return new rust_rocksdb_table_properties_collection_iter_t{
-      collection->rep.cbegin(), collection->rep.cend()};
+    const rust_rocksdb_table_properties_collection_t* collection) noexcept {
+  return RustNewOrAbort<rust_rocksdb_table_properties_collection_iter_t>(
+      collection->rep.cbegin(), collection->rep.cend());
 }
 
 extern "C" void rust_rocksdb_table_properties_collection_iter_destroy(
-    rust_rocksdb_table_properties_collection_iter_t* iterator) {
+    rust_rocksdb_table_properties_collection_iter_t* iterator) noexcept {
   delete iterator;
 }
 
@@ -685,14 +749,15 @@ extern "C" unsigned char
 rust_rocksdb_table_properties_collection_iter_next(
     rust_rocksdb_table_properties_collection_iter_t* iterator,
     const char** file_name, size_t* file_name_len,
-    rust_rocksdb_table_properties_t** properties) {
+    rust_rocksdb_table_properties_t** properties) noexcept {
   if (iterator->current == iterator->end) {
     return 0;
   }
 
   *file_name = iterator->current->first.data();
   *file_name_len = iterator->current->first.size();
-  *properties = new rust_rocksdb_table_properties_t{iterator->current->second};
+  *properties = RustNewOrAbort<rust_rocksdb_table_properties_t>(
+      iterator->current->second);
   ++iterator->current;
   return 1;
 }
@@ -702,9 +767,12 @@ rust_rocksdb_table_properties_collection_iter_next(
 
 每个 getter 直接读取 `properties->rep` 的只读字段。例如：
 
+以下所有 getter 的定义都必须显式标记 `noexcept`，并与 header 中的
+`RUST_ROCKSDB_NOEXCEPT` 声明保持一致。
+
 ```cpp
 extern "C" void rust_rocksdb_table_properties_destroy(
-    rust_rocksdb_table_properties_t* properties) {
+    rust_rocksdb_table_properties_t* properties) noexcept {
   delete properties;
 }
 
@@ -765,32 +833,33 @@ extern "C" uint64_t rust_rocksdb_table_properties_num_range_deletions(
 
 ```cpp
 static rust_rocksdb_user_collected_properties_iter_t*
-RustPropertiesIter(const UserCollectedProperties& properties) {
-  return new rust_rocksdb_user_collected_properties_iter_t{
-      properties.cbegin(), properties.cend()};
+RustPropertiesIter(const UserCollectedProperties& properties) noexcept {
+  return RustNewOrAbort<rust_rocksdb_user_collected_properties_iter_t>(
+      properties.cbegin(), properties.cend());
 }
 
 extern "C" rust_rocksdb_user_collected_properties_iter_t*
 rust_rocksdb_table_properties_user_collected_properties_iter_create(
-    const rust_rocksdb_table_properties_t* properties) {
+    const rust_rocksdb_table_properties_t* properties) noexcept {
   return RustPropertiesIter(properties->rep->user_collected_properties);
 }
 
 extern "C" rust_rocksdb_user_collected_properties_iter_t*
 rust_rocksdb_table_properties_readable_properties_iter_create(
-    const rust_rocksdb_table_properties_t* properties) {
+    const rust_rocksdb_table_properties_t* properties) noexcept {
   return RustPropertiesIter(properties->rep->readable_properties);
 }
 
 extern "C" void rust_rocksdb_user_collected_properties_iter_destroy(
-    rust_rocksdb_user_collected_properties_iter_t* iterator) {
+    rust_rocksdb_user_collected_properties_iter_t* iterator) noexcept {
   delete iterator;
 }
 
 extern "C" unsigned char
 rust_rocksdb_user_collected_properties_iter_next(
     rust_rocksdb_user_collected_properties_iter_t* iterator,
-    const char** key, size_t* key_len, const char** value, size_t* value_len) {
+    const char** key, size_t* key_len, const char** value,
+    size_t* value_len) noexcept {
   if (iterator->current == iterator->end) {
     return 0;
   }
@@ -1332,7 +1401,26 @@ git diff --check actual-upstream/master..HEAD
 
 预期：全部退出码 `0`。
 
-- [ ] **步骤 2：运行 workspace Windows 验证**
+- [ ] **步骤 2：单独覆盖 GitHub Actions 使用的 Windows MSVC 路径**
+
+运行：
+
+```powershell
+cargo +1.91.0-x86_64-pc-windows-msvc test `
+  --package rust-librocksdb-sys `
+  --target x86_64-pc-windows-msvc `
+  --no-run
+cargo +1.91.0-x86_64-pc-windows-msvc test `
+  --test test_table_properties_read `
+  --features multi-threaded-cf `
+  --target x86_64-pc-windows-msvc
+```
+
+预期：两条命令退出码 `0`。如果缺少 MSVC 1.91、Visual Studio Build Tools、
+LLVM 或系统依赖，记录为环境缺口；MinGW 验证通过不能替代该门禁，也不能据此
+宣称完整 Windows 兼容。
+
+- [ ] **步骤 3：运行 workspace Windows 验证**
 
 运行：
 
@@ -1342,7 +1430,7 @@ cargo test --workspace --features multi-threaded-cf
 
 预期：全部测试通过，失败数为 `0`。
 
-- [ ] **步骤 3：运行 focused WSL/Linux 验证**
+- [ ] **步骤 4：运行 focused WSL/Linux 验证**
 
 运行：
 
@@ -1356,7 +1444,7 @@ cargo clippy --all-targets --features multi-threaded-cf -- -D warnings
 
 预期：全部退出码 `0`。
 
-- [ ] **步骤 4：运行 workspace WSL/Linux 验证**
+- [ ] **步骤 5：运行 workspace WSL/Linux 验证**
 
 运行：
 
@@ -1367,7 +1455,7 @@ cargo test --workspace --features multi-threaded-cf
 
 预期：全部测试通过，失败数为 `0`。
 
-- [ ] **步骤 5：检查 extension 同时被 bundled/system 框架引用**
+- [ ] **步骤 6：检查 extension 同时被 bundled/system 框架引用**
 
 运行：
 
@@ -1379,7 +1467,7 @@ rg -n 'c-api-extensions/c_api_extensions.cc|build_for_system_backend|c_api_exten
 
 如果当前机器没有 system RocksDB，不宣称 system backend 已运行通过；将其明确记录为后续 backend 验证计划的环境缺口。
 
-- [ ] **步骤 6：最终提交和工作树对账**
+- [ ] **步骤 7：最终提交和工作树对账**
 
 运行：
 
