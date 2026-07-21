@@ -9,8 +9,10 @@
 #include "c_api_extensions.h"
 
 #include <cassert>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <memory>
 #include <new>
 #include <string>
@@ -29,14 +31,19 @@ using ROCKSDB_NAMESPACE::ColumnFamilyHandle;
 using ROCKSDB_NAMESPACE::CompactRangeOptions;
 using ROCKSDB_NAMESPACE::CompactionJobInfo;
 using ROCKSDB_NAMESPACE::DB;
+using ROCKSDB_NAMESPACE::EntryType;
 using ROCKSDB_NAMESPACE::EventListener;
 using ROCKSDB_NAMESPACE::ExternalFileIngestionInfo;
 using ROCKSDB_NAMESPACE::FlushJobInfo;
 using ROCKSDB_NAMESPACE::Options;
 using ROCKSDB_NAMESPACE::ReadOptions;
+using ROCKSDB_NAMESPACE::SequenceNumber;
+using ROCKSDB_NAMESPACE::Slice;
 using ROCKSDB_NAMESPACE::Status;
 using ROCKSDB_NAMESPACE::SubcompactionJobInfo;
 using ROCKSDB_NAMESPACE::TableProperties;
+using ROCKSDB_NAMESPACE::TablePropertiesCollector;
+using ROCKSDB_NAMESPACE::TablePropertiesCollectorFactory;
 using ROCKSDB_NAMESPACE::TablePropertiesCollection;
 using ROCKSDB_NAMESPACE::UserCollectedProperties;
 using ROCKSDB_NAMESPACE::WriteStallInfo;
@@ -293,6 +300,355 @@ extern "C" void rust_rocksdb_options_add_eventlistener(
     rocksdb_options_t* opt, rust_rocksdb_eventlistener_t* listener) {
   reinterpret_cast<Options*>(opt)->listeners.emplace_back(
       std::shared_ptr<EventListener>(listener));
+}
+
+// -----------------------------------------------------------------------------
+// TablePropertiesCollector and TablePropertiesCollectorFactory
+// -----------------------------------------------------------------------------
+
+#if RUST_ROCKSDB_COLLECTOR_FACTORY_SUPPORTED
+
+namespace {
+
+[[noreturn]] void AbortCollectorCallback(const char* message) noexcept {
+  std::fputs(message, stderr);
+  std::fputc('\n', stderr);
+  std::abort();
+}
+
+void DestroyRustState(void* state, void (*destructor)(void*)) noexcept {
+  if (destructor == nullptr) {
+    return;
+  }
+  try {
+    destructor(state);
+  } catch (...) {
+  }
+}
+
+bool ValidBytes(const char* data, size_t length) noexcept {
+  return data != nullptr || length == 0;
+}
+
+std::string CopyBytes(const char* data, size_t length) {
+  return length == 0 ? std::string() : std::string(data, length);
+}
+
+uint8_t RustEntryType(EntryType entry_type) noexcept {
+  switch (entry_type) {
+    case ROCKSDB_NAMESPACE::kEntryPut:
+      return 0;
+    case ROCKSDB_NAMESPACE::kEntryDelete:
+      return 1;
+    case ROCKSDB_NAMESPACE::kEntrySingleDelete:
+      return 2;
+    case ROCKSDB_NAMESPACE::kEntryMerge:
+      return 3;
+    case ROCKSDB_NAMESPACE::kEntryRangeDeletion:
+      return 4;
+    case ROCKSDB_NAMESPACE::kEntryBlobIndex:
+      return 5;
+    case ROCKSDB_NAMESPACE::kEntryDeleteWithTimestamp:
+      return 6;
+    case ROCKSDB_NAMESPACE::kEntryWideColumnEntity:
+      return 7;
+    case ROCKSDB_NAMESPACE::kEntryTimedPut:
+      return 8;
+    case ROCKSDB_NAMESPACE::kEntryOther:
+    default:
+      return 9;
+  }
+}
+
+}  // namespace
+
+struct rust_rocksdb_user_collected_properties_sink_t {
+  UserCollectedProperties* rep;
+  bool failed;
+};
+
+class RustTablePropertiesCollector final : public TablePropertiesCollector {
+ public:
+  RustTablePropertiesCollector(
+      void* state, void (*destructor)(void*), std::string name,
+      rust_rocksdb_table_properties_collector_add_cb add,
+      rust_rocksdb_table_properties_collector_finish_cb finish,
+      rust_rocksdb_table_properties_collector_readable_cb readable)
+      : state_(state),
+        destructor_(destructor),
+        name_(std::move(name)),
+        add_(add),
+        finish_(finish),
+        readable_(readable) {}
+
+  ~RustTablePropertiesCollector() override {
+    DestroyRustState(state_, destructor_);
+  }
+
+  RustTablePropertiesCollector(const RustTablePropertiesCollector&) = delete;
+  RustTablePropertiesCollector& operator=(const RustTablePropertiesCollector&) =
+      delete;
+
+  Status AddUserKey(const Slice& key, const Slice& value, EntryType entry_type,
+                    SequenceNumber sequence, uint64_t file_size) noexcept override {
+    try {
+      if (add_(state_, key.data(), key.size(), value.data(), value.size(),
+               RustEntryType(entry_type), sequence, file_size) == 0) {
+        AbortCollectorCallback(
+            "rust-rocksdb: table properties collector add callback failed");
+      }
+      return Status::OK();
+    } catch (...) {
+      AbortCollectorCallback(
+          "rust-rocksdb: table properties collector add callback threw");
+    }
+  }
+
+  Status Finish(UserCollectedProperties* properties) noexcept override {
+    try {
+      UserCollectedProperties collected;
+      rust_rocksdb_user_collected_properties_sink_t sink{&collected, false};
+      if (finish_(state_, &sink) == 0 || sink.failed) {
+        AbortCollectorCallback(
+            "rust-rocksdb: table properties collector finish callback failed");
+      }
+      properties->swap(collected);
+      return Status::OK();
+    } catch (...) {
+      AbortCollectorCallback(
+          "rust-rocksdb: table properties collector finish callback threw");
+    }
+  }
+
+  UserCollectedProperties GetReadableProperties() const noexcept override {
+    try {
+      UserCollectedProperties collected;
+      rust_rocksdb_user_collected_properties_sink_t sink{&collected, false};
+      if (readable_(state_, &sink) == 0 || sink.failed) {
+        return {};
+      }
+      return collected;
+    } catch (...) {
+      return {};
+    }
+  }
+
+  const char* Name() const noexcept override { return name_.c_str(); }
+
+ private:
+  void* state_;
+  void (*destructor_)(void*);
+  std::string name_;
+  rust_rocksdb_table_properties_collector_add_cb add_;
+  rust_rocksdb_table_properties_collector_finish_cb finish_;
+  rust_rocksdb_table_properties_collector_readable_cb readable_;
+};
+
+struct rust_rocksdb_table_properties_collector_t {
+  std::unique_ptr<TablePropertiesCollector> rep;
+};
+
+class RustTablePropertiesCollectorFactory final
+    : public TablePropertiesCollectorFactory {
+ public:
+  RustTablePropertiesCollectorFactory(
+      void* state, void (*destructor)(void*), std::string name,
+      rust_rocksdb_table_properties_collector_factory_create_cb create)
+      : state_(state),
+        destructor_(destructor),
+        name_(std::move(name)),
+        create_(create) {}
+
+  ~RustTablePropertiesCollectorFactory() override {
+    DestroyRustState(state_, destructor_);
+  }
+
+  RustTablePropertiesCollectorFactory(
+      const RustTablePropertiesCollectorFactory&) = delete;
+  RustTablePropertiesCollectorFactory& operator=(
+      const RustTablePropertiesCollectorFactory&) = delete;
+
+  TablePropertiesCollector* CreateTablePropertiesCollector(
+      TablePropertiesCollectorFactory::Context context) noexcept override {
+    try {
+      std::unique_ptr<rust_rocksdb_table_properties_collector_t> collector(
+          create_(state_, context.column_family_id, context.level_at_creation,
+                  context.num_levels,
+                  context.last_level_inclusive_max_seqno_threshold));
+      if (collector == nullptr || collector->rep == nullptr) {
+        AbortCollectorCallback(
+            "rust-rocksdb: table properties collector factory callback failed");
+      }
+      return collector->rep.release();
+    } catch (...) {
+      AbortCollectorCallback(
+          "rust-rocksdb: table properties collector factory callback threw");
+    }
+  }
+
+  const char* Name() const noexcept override { return name_.c_str(); }
+
+ private:
+  void* state_;
+  void (*destructor_)(void*);
+  std::string name_;
+  rust_rocksdb_table_properties_collector_factory_create_cb create_;
+};
+
+struct rust_rocksdb_table_properties_collector_factory_t {
+  std::shared_ptr<TablePropertiesCollectorFactory> rep;
+};
+
+#endif  // RUST_ROCKSDB_COLLECTOR_FACTORY_SUPPORTED
+
+extern "C" unsigned char
+rust_rocksdb_table_properties_collector_factory_supported(void) noexcept {
+#if RUST_ROCKSDB_COLLECTOR_FACTORY_SUPPORTED
+  return 1;
+#else
+  return 0;
+#endif
+}
+
+extern "C" rust_rocksdb_table_properties_collector_t*
+rust_rocksdb_table_properties_collector_create(
+    void* state, void (*destructor)(void*), const char* name, size_t name_len,
+    rust_rocksdb_table_properties_collector_add_cb add,
+    rust_rocksdb_table_properties_collector_finish_cb finish,
+    rust_rocksdb_table_properties_collector_readable_cb readable) noexcept {
+#if RUST_ROCKSDB_COLLECTOR_FACTORY_SUPPORTED
+  if (destructor == nullptr || add == nullptr || finish == nullptr ||
+      readable == nullptr || !ValidBytes(name, name_len)) {
+    DestroyRustState(state, destructor);
+    return nullptr;
+  }
+  try {
+    auto rep = std::make_unique<RustTablePropertiesCollector>(
+        state, destructor, CopyBytes(name, name_len), add, finish, readable);
+    state = nullptr;
+    auto* collector =
+        new (std::nothrow) rust_rocksdb_table_properties_collector_t{
+            std::move(rep)};
+    return collector;
+  } catch (...) {
+    if (state != nullptr) {
+      DestroyRustState(state, destructor);
+    }
+    return nullptr;
+  }
+#else
+  if (destructor != nullptr) {
+    try {
+      destructor(state);
+    } catch (...) {
+    }
+  }
+  return nullptr;
+#endif
+}
+
+extern "C" void rust_rocksdb_table_properties_collector_destroy(
+    rust_rocksdb_table_properties_collector_t* collector) noexcept {
+#if RUST_ROCKSDB_COLLECTOR_FACTORY_SUPPORTED
+  delete collector;
+#else
+  (void)collector;
+#endif
+}
+
+extern "C" rust_rocksdb_table_properties_collector_factory_t*
+rust_rocksdb_table_properties_collector_factory_create(
+    void* state, void (*destructor)(void*), const char* name, size_t name_len,
+    rust_rocksdb_table_properties_collector_factory_create_cb create) noexcept {
+#if RUST_ROCKSDB_COLLECTOR_FACTORY_SUPPORTED
+  if (destructor == nullptr || create == nullptr ||
+      !ValidBytes(name, name_len)) {
+    DestroyRustState(state, destructor);
+    return nullptr;
+  }
+  try {
+    auto rep = std::make_shared<RustTablePropertiesCollectorFactory>(
+        state, destructor, CopyBytes(name, name_len), create);
+    state = nullptr;
+    auto* factory =
+        new (std::nothrow) rust_rocksdb_table_properties_collector_factory_t{
+            std::move(rep)};
+    return factory;
+  } catch (...) {
+    if (state != nullptr) {
+      DestroyRustState(state, destructor);
+    }
+    return nullptr;
+  }
+#else
+  if (destructor != nullptr) {
+    try {
+      destructor(state);
+    } catch (...) {
+    }
+  }
+  return nullptr;
+#endif
+}
+
+extern "C" void rust_rocksdb_table_properties_collector_factory_destroy(
+    rust_rocksdb_table_properties_collector_factory_t* factory) noexcept {
+#if RUST_ROCKSDB_COLLECTOR_FACTORY_SUPPORTED
+  delete factory;
+#else
+  (void)factory;
+#endif
+}
+
+extern "C" unsigned char
+rust_rocksdb_options_add_table_properties_collector_factory(
+    rocksdb_options_t* options,
+    rust_rocksdb_table_properties_collector_factory_t* factory) noexcept {
+#if RUST_ROCKSDB_COLLECTOR_FACTORY_SUPPORTED
+  if (options == nullptr || factory == nullptr || factory->rep == nullptr) {
+    return 0;
+  }
+  try {
+    reinterpret_cast<Options*>(options)
+        ->table_properties_collector_factories.emplace_back(factory->rep);
+    return 1;
+  } catch (...) {
+    return 0;
+  }
+#else
+  (void)options;
+  (void)factory;
+  return 0;
+#endif
+}
+
+extern "C" unsigned char rust_rocksdb_user_collected_properties_sink_add(
+    rust_rocksdb_user_collected_properties_sink_t* sink, const char* key,
+    size_t key_len, const char* value, size_t value_len) noexcept {
+#if RUST_ROCKSDB_COLLECTOR_FACTORY_SUPPORTED
+  if (sink == nullptr || sink->rep == nullptr || !ValidBytes(key, key_len) ||
+      !ValidBytes(value, value_len)) {
+    if (sink != nullptr) {
+      sink->failed = true;
+    }
+    return 0;
+  }
+  try {
+    sink->rep->insert_or_assign(CopyBytes(key, key_len),
+                                CopyBytes(value, value_len));
+    return 1;
+  } catch (...) {
+    sink->failed = true;
+    return 0;
+  }
+#else
+  (void)sink;
+  (void)key;
+  (void)key_len;
+  (void)value;
+  (void)value_len;
+  return 0;
+#endif
 }
 
 // The opaque-handle types the C API hands out are defined at file scope in

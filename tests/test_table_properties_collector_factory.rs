@@ -116,6 +116,14 @@ fn readable_properties_default_to_empty() {
 }
 
 #[test]
+fn bundled_backend_reports_support() {
+    let supported =
+        unsafe { rust_librocksdb_sys::rust_rocksdb_table_properties_collector_factory_supported() };
+
+    assert_eq!(supported, 1);
+}
+
+#[test]
 fn closure_callback_preserves_the_original_public_adapter() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let observed_for_add = Arc::clone(&observed);

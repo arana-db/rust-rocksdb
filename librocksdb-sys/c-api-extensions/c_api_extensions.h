@@ -164,6 +164,68 @@ extern ROCKSDB_LIBRARY_API void rust_rocksdb_eventlistener_destroy(
 extern ROCKSDB_LIBRARY_API void rust_rocksdb_options_add_eventlistener(
     rocksdb_options_t*, rust_rocksdb_eventlistener_t*);
 
+#ifdef __cplusplus
+#define RUST_ROCKSDB_NOEXCEPT noexcept
+#else
+#define RUST_ROCKSDB_NOEXCEPT
+#endif
+
+/* -------------------------------------------------------------------------
+ * TablePropertiesCollector and TablePropertiesCollectorFactory
+ *
+ * The Rust callbacks use length-delimited byte strings and integer values so
+ * no C++ object layout crosses the ABI. The factory is supported only by the
+ * bundled backend because registering it requires access to RocksDB Options.
+ * ------------------------------------------------------------------------- */
+typedef struct rust_rocksdb_table_properties_collector_t
+    rust_rocksdb_table_properties_collector_t;
+typedef struct rust_rocksdb_table_properties_collector_factory_t
+    rust_rocksdb_table_properties_collector_factory_t;
+typedef struct rust_rocksdb_user_collected_properties_sink_t
+    rust_rocksdb_user_collected_properties_sink_t;
+
+typedef unsigned char (*rust_rocksdb_table_properties_collector_add_cb)(
+    void*, const char*, size_t, const char*, size_t, uint8_t, uint64_t,
+    uint64_t);
+typedef unsigned char (*rust_rocksdb_table_properties_collector_finish_cb)(
+    void*, rust_rocksdb_user_collected_properties_sink_t*);
+typedef unsigned char
+    (*rust_rocksdb_table_properties_collector_readable_cb)(
+        const void*, rust_rocksdb_user_collected_properties_sink_t*);
+typedef rust_rocksdb_table_properties_collector_t*
+    (*rust_rocksdb_table_properties_collector_factory_create_cb)(
+        const void*, uint32_t, int32_t, int32_t, uint64_t);
+
+extern ROCKSDB_LIBRARY_API unsigned char
+rust_rocksdb_table_properties_collector_factory_supported(void)
+    RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API rust_rocksdb_table_properties_collector_t*
+rust_rocksdb_table_properties_collector_create(
+    void*, void (*)(void*), const char*, size_t,
+    rust_rocksdb_table_properties_collector_add_cb,
+    rust_rocksdb_table_properties_collector_finish_cb,
+    rust_rocksdb_table_properties_collector_readable_cb)
+    RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API void rust_rocksdb_table_properties_collector_destroy(
+    rust_rocksdb_table_properties_collector_t*) RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API rust_rocksdb_table_properties_collector_factory_t*
+rust_rocksdb_table_properties_collector_factory_create(
+    void*, void (*)(void*), const char*, size_t,
+    rust_rocksdb_table_properties_collector_factory_create_cb)
+    RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API void
+rust_rocksdb_table_properties_collector_factory_destroy(
+    rust_rocksdb_table_properties_collector_factory_t*)
+    RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API unsigned char
+rust_rocksdb_options_add_table_properties_collector_factory(
+    rocksdb_options_t*, rust_rocksdb_table_properties_collector_factory_t*)
+    RUST_ROCKSDB_NOEXCEPT;
+extern ROCKSDB_LIBRARY_API unsigned char
+rust_rocksdb_user_collected_properties_sink_add(
+    rust_rocksdb_user_collected_properties_sink_t*, const char*, size_t,
+    const char*, size_t) RUST_ROCKSDB_NOEXCEPT;
+
 /* -------------------------------------------------------------------------
  * DB::GetPropertiesOfAllTables
  *
@@ -179,12 +241,6 @@ typedef struct rust_rocksdb_table_properties_t
     rust_rocksdb_table_properties_t;
 typedef struct rust_rocksdb_user_collected_properties_iter_t
     rust_rocksdb_user_collected_properties_iter_t;
-
-#ifdef __cplusplus
-#define RUST_ROCKSDB_NOEXCEPT noexcept
-#else
-#define RUST_ROCKSDB_NOEXCEPT
-#endif
 
 extern ROCKSDB_LIBRARY_API rust_rocksdb_table_properties_collection_t*
 rust_rocksdb_get_properties_of_all_tables(rocksdb_t*, char**)
