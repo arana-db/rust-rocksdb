@@ -126,17 +126,18 @@ pub trait TablePropertiesCollectorFactory: Send + Sync + 'static {
 }
 ```
 
-与旧接口相比，唯一必要的调用方源码调整是：
+与旧接口相比，已知的源码兼容性调整包括：
 
-```rust
-fn create(&mut self, ...)
-```
-
-改为：
+`fn create(&mut self, ...)` 改为：
 
 ```rust
 fn create(&self, ...)
 ```
+
+此外，Collector 必须满足 `Send + 'static`，
+Factory 必须满足 `Send + Sync + 'static`。持有非 `'static` 借用、`Rc` 或其他
+非 `Send`/`Sync` 状态的旧实现需要改为线程安全的拥有型状态；Kiwi 当前基于
+`CString` 和 `Arc` 的实现满足这些约束。
 
 不能通过隐藏 Mutex 保留错误的 `&mut self` 公共语义。RocksDB 明确要求 Factory 必须 thread-safe，同一 Factory 可以被多个 flush/compaction 后台线程并发调用。
 
