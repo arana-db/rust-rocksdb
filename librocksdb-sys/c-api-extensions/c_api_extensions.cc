@@ -12,14 +12,20 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <string>
+#include <unordered_map>
+#include <utility>
 
+#include "rocksdb/db.h"
 #include "rocksdb/listener.h"
 #include "rocksdb/options.h"
 #include "rocksdb/table.h"
+#include "rocksdb/table_properties.h"
 
 using ROCKSDB_NAMESPACE::BackgroundErrorRecoveryInfo;
 using ROCKSDB_NAMESPACE::BlockBasedTableOptions;
+using ROCKSDB_NAMESPACE::ColumnFamilyHandle;
 using ROCKSDB_NAMESPACE::CompactRangeOptions;
 using ROCKSDB_NAMESPACE::CompactionJobInfo;
 using ROCKSDB_NAMESPACE::DB;
@@ -30,6 +36,9 @@ using ROCKSDB_NAMESPACE::Options;
 using ROCKSDB_NAMESPACE::ReadOptions;
 using ROCKSDB_NAMESPACE::Status;
 using ROCKSDB_NAMESPACE::SubcompactionJobInfo;
+using ROCKSDB_NAMESPACE::TableProperties;
+using ROCKSDB_NAMESPACE::TablePropertiesCollection;
+using ROCKSDB_NAMESPACE::UserCollectedProperties;
 using ROCKSDB_NAMESPACE::WriteStallInfo;
 using ROCKSDB_NAMESPACE::MemTableInfo;
 
@@ -58,6 +67,20 @@ static bool RustSaveError(char** errptr, const Status& s) {
   }
   *errptr = copy;
   return true;
+}
+
+static void RustSaveStaticError(char** errptr, const char* message) noexcept {
+  assert(errptr != nullptr);
+  const size_t length = std::strlen(message);
+  char* copy = static_cast<char*>(std::malloc(length + 1));
+  if (copy != nullptr) {
+    std::memcpy(copy, message, length + 1);
+  }
+
+  if (*errptr != nullptr) {
+    std::free(*errptr);
+  }
+  *errptr = copy;
 }
 
 extern "C" void rust_rocksdb_status_get_error(rust_rocksdb_status_t* status,
@@ -349,4 +372,233 @@ extern "C" void rocksdb_compactoptions_set_blob_garbage_collection_age_cutoff(
 extern "C" double rocksdb_compactoptions_get_blob_garbage_collection_age_cutoff(
     rocksdb_compactoptions_t* opt) {
   return reinterpret_cast<CompactRangeOptions*>(opt)->blob_garbage_collection_age_cutoff;
+}
+
+// -----------------------------------------------------------------------------
+// DB::GetPropertiesOfAllTables
+//
+// RocksDB's db/c.cc defines rocksdb_t with DB* rep as its first field and
+// rocksdb_column_family_handle_t with ColumnFamilyHandle* rep as its first
+// field. The named-column-family integration test exercises both layout
+// assumptions. The extension owns every C++ object it creates; it never
+// exposes references into the vendored RocksDB sources as C structs.
+// -----------------------------------------------------------------------------
+
+struct rust_rocksdb_table_properties_collection_t {
+  TablePropertiesCollection rep;
+};
+
+struct rust_rocksdb_table_properties_collection_iter_t {
+  TablePropertiesCollection::const_iterator current;
+  TablePropertiesCollection::const_iterator end;
+};
+
+struct rust_rocksdb_table_properties_t {
+  std::shared_ptr<const TableProperties> rep;
+};
+
+struct rust_rocksdb_user_collected_properties_iter_t {
+  UserCollectedProperties::const_iterator current;
+  UserCollectedProperties::const_iterator end;
+};
+
+static DB* RustDB(rocksdb_t* db) noexcept {
+  return *reinterpret_cast<DB**>(db);
+}
+
+static ColumnFamilyHandle* RustColumnFamilyHandle(
+    rocksdb_column_family_handle_t* column_family) noexcept {
+  return *reinterpret_cast<ColumnFamilyHandle**>(column_family);
+}
+
+template <typename T, typename... Args>
+static T* RustNewOrAbort(Args&&... args) noexcept {
+  T* value = new (std::nothrow) T{std::forward<Args>(args)...};
+  if (value == nullptr) {
+    std::abort();
+  }
+  return value;
+}
+
+extern "C" rust_rocksdb_table_properties_collection_t*
+rust_rocksdb_get_properties_of_all_tables(rocksdb_t* db,
+                                           char** errptr) noexcept {
+  auto* raw =
+      new (std::nothrow) rust_rocksdb_table_properties_collection_t();
+  if (raw == nullptr) {
+    RustSaveStaticError(errptr,
+                        "failed to allocate table properties collection");
+    return nullptr;
+  }
+
+  std::unique_ptr<rust_rocksdb_table_properties_collection_t> collection(raw);
+  try {
+    Status status = RustDB(db)->GetPropertiesOfAllTables(&collection->rep);
+    if (RustSaveError(errptr, status)) {
+      return nullptr;
+    }
+    return collection.release();
+  } catch (...) {
+    RustSaveStaticError(errptr, "exception while reading table properties");
+    return nullptr;
+  }
+}
+
+extern "C" rust_rocksdb_table_properties_collection_t*
+rust_rocksdb_get_properties_of_all_tables_cf(
+    rocksdb_t* db, rocksdb_column_family_handle_t* column_family,
+    char** errptr) noexcept {
+  auto* raw =
+      new (std::nothrow) rust_rocksdb_table_properties_collection_t();
+  if (raw == nullptr) {
+    RustSaveStaticError(errptr,
+                        "failed to allocate table properties collection");
+    return nullptr;
+  }
+
+  std::unique_ptr<rust_rocksdb_table_properties_collection_t> collection(raw);
+  try {
+    Status status = RustDB(db)->GetPropertiesOfAllTables(
+        RustColumnFamilyHandle(column_family), &collection->rep);
+    if (RustSaveError(errptr, status)) {
+      return nullptr;
+    }
+    return collection.release();
+  } catch (...) {
+    RustSaveStaticError(errptr, "exception while reading table properties");
+    return nullptr;
+  }
+}
+
+extern "C" void rust_rocksdb_table_properties_collection_destroy(
+    rust_rocksdb_table_properties_collection_t* collection) noexcept {
+  delete collection;
+}
+
+extern "C" size_t rust_rocksdb_table_properties_collection_len(
+    const rust_rocksdb_table_properties_collection_t* collection) noexcept {
+  return collection->rep.size();
+}
+
+extern "C" rust_rocksdb_table_properties_collection_iter_t*
+rust_rocksdb_table_properties_collection_iter_create(
+    const rust_rocksdb_table_properties_collection_t* collection) noexcept {
+  return RustNewOrAbort<rust_rocksdb_table_properties_collection_iter_t>(
+      collection->rep.cbegin(), collection->rep.cend());
+}
+
+extern "C" void rust_rocksdb_table_properties_collection_iter_destroy(
+    rust_rocksdb_table_properties_collection_iter_t* iterator) noexcept {
+  delete iterator;
+}
+
+extern "C" unsigned char
+rust_rocksdb_table_properties_collection_iter_next(
+    rust_rocksdb_table_properties_collection_iter_t* iterator,
+    const char** file_name, size_t* file_name_len,
+    rust_rocksdb_table_properties_t** properties) noexcept {
+  if (iterator->current == iterator->end) {
+    return 0;
+  }
+
+  *file_name = iterator->current->first.data();
+  *file_name_len = iterator->current->first.size();
+  *properties = RustNewOrAbort<rust_rocksdb_table_properties_t>(
+      iterator->current->second);
+  ++iterator->current;
+  return 1;
+}
+
+extern "C" void rust_rocksdb_table_properties_destroy(
+    rust_rocksdb_table_properties_t* properties) noexcept {
+  delete properties;
+}
+
+extern "C" uint64_t rust_rocksdb_table_properties_data_size(
+    const rust_rocksdb_table_properties_t* properties) noexcept {
+  return properties->rep->data_size;
+}
+
+extern "C" uint64_t rust_rocksdb_table_properties_index_size(
+    const rust_rocksdb_table_properties_t* properties) noexcept {
+  return properties->rep->index_size;
+}
+
+extern "C" uint64_t rust_rocksdb_table_properties_filter_size(
+    const rust_rocksdb_table_properties_t* properties) noexcept {
+  return properties->rep->filter_size;
+}
+
+extern "C" uint64_t rust_rocksdb_table_properties_raw_key_size(
+    const rust_rocksdb_table_properties_t* properties) noexcept {
+  return properties->rep->raw_key_size;
+}
+
+extern "C" uint64_t rust_rocksdb_table_properties_raw_value_size(
+    const rust_rocksdb_table_properties_t* properties) noexcept {
+  return properties->rep->raw_value_size;
+}
+
+extern "C" uint64_t rust_rocksdb_table_properties_num_data_blocks(
+    const rust_rocksdb_table_properties_t* properties) noexcept {
+  return properties->rep->num_data_blocks;
+}
+
+extern "C" uint64_t rust_rocksdb_table_properties_num_entries(
+    const rust_rocksdb_table_properties_t* properties) noexcept {
+  return properties->rep->num_entries;
+}
+
+extern "C" uint64_t rust_rocksdb_table_properties_num_deletions(
+    const rust_rocksdb_table_properties_t* properties) noexcept {
+  return properties->rep->num_deletions;
+}
+
+extern "C" uint64_t rust_rocksdb_table_properties_num_merge_operands(
+    const rust_rocksdb_table_properties_t* properties) noexcept {
+  return properties->rep->num_merge_operands;
+}
+
+extern "C" uint64_t rust_rocksdb_table_properties_num_range_deletions(
+    const rust_rocksdb_table_properties_t* properties) noexcept {
+  return properties->rep->num_range_deletions;
+}
+
+static rust_rocksdb_user_collected_properties_iter_t* RustPropertiesIter(
+    const UserCollectedProperties& properties) noexcept {
+  return RustNewOrAbort<rust_rocksdb_user_collected_properties_iter_t>(
+      properties.cbegin(), properties.cend());
+}
+
+extern "C" rust_rocksdb_user_collected_properties_iter_t*
+rust_rocksdb_table_properties_user_collected_properties_iter_create(
+    const rust_rocksdb_table_properties_t* properties) noexcept {
+  return RustPropertiesIter(properties->rep->user_collected_properties);
+}
+
+extern "C" rust_rocksdb_user_collected_properties_iter_t*
+rust_rocksdb_table_properties_readable_properties_iter_create(
+    const rust_rocksdb_table_properties_t* properties) noexcept {
+  return RustPropertiesIter(properties->rep->readable_properties);
+}
+
+extern "C" void rust_rocksdb_user_collected_properties_iter_destroy(
+    rust_rocksdb_user_collected_properties_iter_t* iterator) noexcept {
+  delete iterator;
+}
+
+extern "C" unsigned char
+rust_rocksdb_user_collected_properties_iter_next(
+    rust_rocksdb_user_collected_properties_iter_t* iterator, const char** key,
+    size_t* key_len, const char** value, size_t* value_len) noexcept {
+  if (iterator->current == iterator->end) {
+    return 0;
+  }
+
+  *key = iterator->current->first.data();
+  *key_len = iterator->current->first.size();
+  *value = iterator->current->second.data();
+  *value_len = iterator->current->second.size();
+  ++iterator->current;
+  return 1;
 }
