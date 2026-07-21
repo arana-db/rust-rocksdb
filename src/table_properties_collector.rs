@@ -221,8 +221,7 @@ where
         );
         true
     }))
-    .map(u8::from)
-    .unwrap_or(0)
+    .map_or(0, u8::from)
 }
 
 pub(crate) unsafe extern "C" fn finish_callback<T>(
@@ -254,8 +253,7 @@ where
             ) != 0
         })
     }))
-    .map(u8::from)
-    .unwrap_or(0)
+    .map_or(0, u8::from)
 }
 
 pub(crate) unsafe extern "C" fn readable_callback<T>(
@@ -290,6 +288,5 @@ where
                 ) != 0
             })
     }))
-    .map(u8::from)
-    .unwrap_or(0)
+    .map_or(0, u8::from)
 }
