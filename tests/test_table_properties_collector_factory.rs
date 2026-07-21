@@ -582,6 +582,18 @@ fn assert_collector_panic_fails_fast(case: &str) {
         !stdout.contains(FLUSH_SUCCEEDED_MARKER),
         "flush returned successfully after a critical collector panic; stdout={stdout}; stderr={stderr}"
     );
+    let expected_diagnostic = match case {
+        "factory_create" | "collector_name" => {
+            "rust-rocksdb: table properties collector factory callback failed"
+        }
+        "add" => "rust-rocksdb: table properties collector add callback failed",
+        "finish" => "rust-rocksdb: table properties collector finish callback failed",
+        _ => unreachable!("test cases are validated before spawning the child"),
+    };
+    assert!(
+        stderr.contains(expected_diagnostic),
+        "collector panic child did not reach the expected fail-fast boundary; expected={expected_diagnostic}; stdout={stdout}; stderr={stderr}"
+    );
 
     assert_all_installed_ssts_have_kiwi_property(db_path);
 }
