@@ -15,7 +15,13 @@
 use std::{
     collections::HashMap,
     ffi::{CStr, CString},
+    panic::{AssertUnwindSafe, catch_unwind},
+    slice,
 };
+
+use libc::{c_char, c_void, size_t};
+
+use crate::ffi;
 
 /// Entry type for key-value pairs observed while RocksDB builds an SST file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,4 +156,140 @@ where
     fn get_readable_properties(&self) -> HashMap<Vec<u8>, Vec<u8>> {
         (self.get_readable_fn)()
     }
+}
+
+unsafe fn bytes_from_raw<'a>(data: *const c_char, len: size_t) -> Option<&'a [u8]> {
+    if data.is_null() {
+        return (len == 0).then_some(&[]);
+    }
+
+    // SAFETY: The caller guarantees that a non-null pointer addresses `len`
+    // bytes for the duration of the synchronous callback.
+    Some(unsafe { slice::from_raw_parts(data.cast::<u8>(), len) })
+}
+
+pub(crate) unsafe extern "C" fn destructor_callback<T>(state: *mut c_void)
+where
+    T: TablePropertiesCollector,
+{
+    if state.is_null() {
+        return;
+    }
+
+    // SAFETY: C++ invokes this exactly once with the Box pointer transferred
+    // when the collector adapter was created.
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        drop(Box::from_raw(state.cast::<T>()));
+    }));
+}
+
+pub(crate) unsafe extern "C" fn add_callback<T>(
+    state: *mut c_void,
+    key: *const c_char,
+    key_len: size_t,
+    value: *const c_char,
+    value_len: size_t,
+    entry_type: u8,
+    sequence: u64,
+    file_size: u64,
+) -> u8
+where
+    T: TablePropertiesCollector,
+{
+    catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: C++ owns this Box for the callback lifetime and serializes
+        // mutable callbacks for one collector instance.
+        let Some(collector) = (unsafe { state.cast::<T>().as_mut() }) else {
+            return false;
+        };
+        // SAFETY: C++ supplies length-delimited RocksDB slices that remain
+        // valid until this callback returns.
+        let Some(key) = (unsafe { bytes_from_raw(key, key_len) }) else {
+            return false;
+        };
+        // SAFETY: Same callback-lifetime guarantee as `key` above.
+        let Some(value) = (unsafe { bytes_from_raw(value, value_len) }) else {
+            return false;
+        };
+
+        collector.add(
+            key,
+            value,
+            DBEntryType::from(entry_type),
+            sequence,
+            file_size,
+        );
+        true
+    }))
+    .map(u8::from)
+    .unwrap_or(0)
+}
+
+pub(crate) unsafe extern "C" fn finish_callback<T>(
+    state: *mut c_void,
+    sink: *mut ffi::rust_rocksdb_user_collected_properties_sink_t,
+) -> u8
+where
+    T: TablePropertiesCollector,
+{
+    catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: C++ owns this Box and Finish is a serialized mutable
+        // callback for the collector.
+        let Some(collector) = (unsafe { state.cast::<T>().as_mut() }) else {
+            return false;
+        };
+        if sink.is_null() {
+            return false;
+        }
+
+        collector.finish().into_iter().all(|(key, value)| unsafe {
+            // SAFETY: `sink` is valid only for this synchronous Finish call;
+            // the native side copies both byte slices before returning.
+            ffi::rust_rocksdb_user_collected_properties_sink_add(
+                sink,
+                key.as_ptr().cast::<c_char>(),
+                key.len(),
+                value.as_ptr().cast::<c_char>(),
+                value.len(),
+            ) != 0
+        })
+    }))
+    .map(u8::from)
+    .unwrap_or(0)
+}
+
+pub(crate) unsafe extern "C" fn readable_callback<T>(
+    state: *const c_void,
+    sink: *mut ffi::rust_rocksdb_user_collected_properties_sink_t,
+) -> u8
+where
+    T: TablePropertiesCollector,
+{
+    catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: C++ owns this Box for the callback lifetime and provides
+        // shared access for the readable-properties callback.
+        let Some(collector) = (unsafe { state.cast::<T>().as_ref() }) else {
+            return false;
+        };
+        if sink.is_null() {
+            return false;
+        }
+
+        collector
+            .get_readable_properties()
+            .into_iter()
+            .all(|(key, value)| unsafe {
+                // SAFETY: The native sink synchronously copies the provided
+                // byte slices and does not retain their pointers.
+                ffi::rust_rocksdb_user_collected_properties_sink_add(
+                    sink,
+                    key.as_ptr().cast::<c_char>(),
+                    key.len(),
+                    value.as_ptr().cast::<c_char>(),
+                    value.len(),
+                ) != 0
+            })
+    }))
+    .map(u8::from)
+    .unwrap_or(0)
 }

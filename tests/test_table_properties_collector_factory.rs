@@ -19,6 +19,7 @@ use std::{
 };
 
 use rust_rocksdb::{
+    DB, Options,
     table_properties_collector::{
         DBEntryType, TablePropertiesCollector, TablePropertiesCollectorCallback,
     },
@@ -26,6 +27,12 @@ use rust_rocksdb::{
         TablePropertiesCollectorContext, TablePropertiesCollectorFactory,
     },
 };
+
+mod util;
+
+use util::DBPath;
+
+const KIWI_PROPERTY_KEY: &[u8] = b"LargestLogIndex/LargestSequenceNumber";
 
 struct ProbeCollector;
 
@@ -60,6 +67,50 @@ impl TablePropertiesCollectorFactory for ProbeFactory {
 
     fn name(&self) -> &CStr {
         c"probe-factory"
+    }
+}
+
+struct SequenceCollector {
+    largest_sequence: u64,
+}
+
+impl TablePropertiesCollector for SequenceCollector {
+    fn name(&self) -> &CStr {
+        c"sequence-collector"
+    }
+
+    fn add(
+        &mut self,
+        _key: &[u8],
+        _value: &[u8],
+        _entry_type: DBEntryType,
+        sequence: u64,
+        _file_size: u64,
+    ) {
+        self.largest_sequence = self.largest_sequence.max(sequence);
+    }
+
+    fn finish(&mut self) -> HashMap<Vec<u8>, Vec<u8>> {
+        HashMap::from([(
+            KIWI_PROPERTY_KEY.to_vec(),
+            format!("17/{}", self.largest_sequence).into_bytes(),
+        )])
+    }
+}
+
+struct SequenceFactory;
+
+impl TablePropertiesCollectorFactory for SequenceFactory {
+    type Collector = SequenceCollector;
+
+    fn create(&self, _context: TablePropertiesCollectorContext) -> Self::Collector {
+        SequenceCollector {
+            largest_sequence: 0,
+        }
+    }
+
+    fn name(&self) -> &CStr {
+        c"sequence-factory"
     }
 }
 
@@ -121,6 +172,33 @@ fn bundled_backend_reports_support() {
         unsafe { rust_librocksdb_sys::rust_rocksdb_table_properties_collector_factory_supported() };
 
     assert_eq!(supported, 1);
+}
+
+#[test]
+fn collector_factory_writes_kiwi_property_bytes_during_flush() {
+    let path = DBPath::new("_rust_rocksdb_table_properties_collector_factory");
+    let mut options = Options::default();
+    options.create_if_missing(true);
+    options.set_table_properties_collector_factory(SequenceFactory);
+
+    let db = DB::open(&options, &path).expect("open collector test database");
+    db.put(b"key-1", b"value-1").expect("put key-1");
+    db.put(b"key-2", b"value-2").expect("put key-2");
+    db.flush().expect("flush collector test database");
+
+    let collection = db
+        .get_properties_of_all_tables()
+        .expect("read collected table properties");
+    let values = collection
+        .iter()
+        .filter_map(|(_, properties)| {
+            properties
+                .user_collected_properties()
+                .remove(KIWI_PROPERTY_KEY)
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(values, vec![b"17/2".to_vec()]);
 }
 
 #[test]

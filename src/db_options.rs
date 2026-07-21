@@ -43,6 +43,7 @@ use crate::{
     },
     slice_transform::SliceTransform,
     statistics::Ticker,
+    table_properties_collector_factory::{self, TablePropertiesCollectorFactory},
 };
 
 // must be Send and Sync because it will be called by RocksDB from different threads
@@ -1787,6 +1788,60 @@ impl Options {
     pub fn add_event_listener<L: EventListener>(&mut self, l: L) {
         let handle = new_event_listener(l);
         unsafe { ffi::rust_rocksdb_options_add_eventlistener(self.inner, handle.inner) }
+    }
+
+    /// Sets the factory used to create a collector for each RocksDB table build.
+    ///
+    /// # Panics
+    ///
+    /// Panics when this crate is linked to a system RocksDB backend, or when
+    /// the native factory wrapper cannot be created or registered.
+    pub fn set_table_properties_collector_factory<F>(&mut self, factory: F)
+    where
+        F: TablePropertiesCollectorFactory,
+    {
+        // SAFETY: The capability query takes no pointers and has no preconditions.
+        let supported = unsafe { ffi::rust_rocksdb_table_properties_collector_factory_supported() };
+        assert_ne!(
+            supported, 0,
+            "table properties collector factories require the bundled RocksDB backend"
+        );
+
+        let factory = Box::new(factory);
+        let name = factory.name();
+        let name_ptr = name.as_ptr();
+        let name_len = name.to_bytes().len();
+        let factory_state = Box::into_raw(factory).cast::<c_void>();
+        // SAFETY: The Box pointer is transferred to the native adapter. The
+        // factory name remains valid while this synchronous call copies it.
+        let handle = unsafe {
+            ffi::rust_rocksdb_table_properties_collector_factory_create(
+                factory_state,
+                Some(table_properties_collector_factory::destructor_callback::<F>),
+                name_ptr,
+                name_len,
+                Some(table_properties_collector_factory::create_callback::<F>),
+            )
+        };
+        assert!(
+            !handle.is_null(),
+            "failed to create the table properties collector factory wrapper"
+        );
+
+        // SAFETY: `self.inner` and `handle` are live native handles. The native
+        // side clones the factory shared_ptr before returning success.
+        let registered = unsafe {
+            ffi::rust_rocksdb_options_add_table_properties_collector_factory(self.inner, handle)
+        };
+        // SAFETY: The temporary handle remains owned by this function and is
+        // destroyed exactly once after the registration attempt.
+        unsafe {
+            ffi::rust_rocksdb_table_properties_collector_factory_destroy(handle);
+        }
+        assert_ne!(
+            registered, 0,
+            "failed to register the table properties collector factory"
+        );
     }
 
     /// This is a factory that provides compaction filter objects which allow
