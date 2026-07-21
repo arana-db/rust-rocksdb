@@ -953,17 +953,19 @@ fn drop_options_clone_and_multi_cf_db_release_factory_and_collectors_once() {
 
     db.put(b"default-key", b"default-value")
         .expect("put default value");
-    let cf1 = db.cf_handle("cf1").expect("get cf1 handle");
-    let cf2 = db.cf_handle("cf2").expect("get cf2 handle");
-    db.put_cf(&cf1, b"cf1-key", b"cf1-value")
-        .expect("put cf1 value");
-    db.put_cf(&cf2, b"cf2-key", b"cf2-value")
-        .expect("put cf2 value");
-    let default_cf = db.cf_handle("default").expect("get default cf handle");
-    let mut flush_options = FlushOptions::default();
-    flush_options.set_wait(true);
-    db.flush_cfs_opt(&[&default_cf, &cf1, &cf2], &flush_options)
-        .expect("flush lifecycle test column families");
+    {
+        let cf1 = db.cf_handle("cf1").expect("get cf1 handle");
+        let cf2 = db.cf_handle("cf2").expect("get cf2 handle");
+        db.put_cf(&cf1, b"cf1-key", b"cf1-value")
+            .expect("put cf1 value");
+        db.put_cf(&cf2, b"cf2-key", b"cf2-value")
+            .expect("put cf2 value");
+        let default_cf = db.cf_handle("default").expect("get default cf handle");
+        let mut flush_options = FlushOptions::default();
+        flush_options.set_wait(true);
+        db.flush_cfs_opt(&[&default_cf, &cf1, &cf2], &flush_options)
+            .expect("flush lifecycle test column families");
+    }
 
     assert_eq!(counts.collectors_created.load(Ordering::SeqCst), 3);
     assert_eq!(counts.collectors_dropped.load(Ordering::SeqCst), 3);
