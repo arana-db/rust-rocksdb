@@ -1804,7 +1804,7 @@ impl Options {
         let supported = unsafe { ffi::rust_rocksdb_table_properties_collector_factory_supported() };
         assert_ne!(
             supported, 0,
-            "table properties collector factories require the bundled RocksDB backend"
+            "TablePropertiesCollectorFactory requires the bundled RocksDB backend"
         );
 
         let factory = Box::new(factory);

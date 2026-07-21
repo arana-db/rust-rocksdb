@@ -14,10 +14,14 @@
 
 use std::{
     collections::HashMap,
+    env,
     ffi::{CStr, CString},
+    io::{self, Write},
+    path::Path,
+    process::Command,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -38,6 +42,10 @@ use util::DBPath;
 
 const KIWI_PROPERTY_KEY: &[u8] = b"LargestLogIndex/LargestSequenceNumber";
 const COLLECTOR_ID_PROPERTY_KEY: &[u8] = b"test.collector-id";
+const COLLECTOR_PANIC_CASE_ENV: &str = "RUST_ROCKSDB_COLLECTOR_PANIC_CASE";
+const COLLECTOR_PANIC_DB_ENV: &str = "RUST_ROCKSDB_COLLECTOR_PANIC_DB";
+const CHILD_STARTED_MARKER: &str = "COLLECTOR_CHILD_STARTED";
+const FLUSH_SUCCEEDED_MARKER: &str = "FLUSH_SUCCEEDED";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedEntry {
@@ -311,8 +319,387 @@ impl TablePropertiesCollectorFactory for SequenceFactory {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PanicCase {
+    FactoryCreate,
+    CollectorName,
+    Add,
+    Finish,
+}
+
+impl PanicCase {
+    fn from_env(value: &str) -> Self {
+        match value {
+            "factory_create" => Self::FactoryCreate,
+            "collector_name" => Self::CollectorName,
+            "add" => Self::Add,
+            "finish" => Self::Finish,
+            other => panic!("unknown collector panic case: {other}"),
+        }
+    }
+}
+
+struct PanickingCollector {
+    case: PanicCase,
+    largest_sequence: u64,
+}
+
+impl TablePropertiesCollector for PanickingCollector {
+    fn name(&self) -> &CStr {
+        if matches!(self.case, PanicCase::CollectorName) {
+            panic!("collector name panic");
+        }
+        c"panicking-collector"
+    }
+
+    fn add(
+        &mut self,
+        _key: &[u8],
+        _value: &[u8],
+        _entry_type: DBEntryType,
+        sequence: u64,
+        _file_size: u64,
+    ) {
+        if matches!(self.case, PanicCase::Add) {
+            panic!("collector add panic");
+        }
+        self.largest_sequence = self.largest_sequence.max(sequence);
+    }
+
+    fn finish(&mut self) -> HashMap<Vec<u8>, Vec<u8>> {
+        if matches!(self.case, PanicCase::Finish) {
+            panic!("collector finish panic");
+        }
+        HashMap::from([(
+            KIWI_PROPERTY_KEY.to_vec(),
+            format!("17/{}", self.largest_sequence).into_bytes(),
+        )])
+    }
+}
+
+struct PanickingFactory {
+    case: PanicCase,
+}
+
+impl TablePropertiesCollectorFactory for PanickingFactory {
+    type Collector = PanickingCollector;
+
+    fn create(&self, _context: TablePropertiesCollectorContext) -> Self::Collector {
+        if matches!(self.case, PanicCase::FactoryCreate) {
+            panic!("collector factory create panic");
+        }
+        PanickingCollector {
+            case: self.case,
+            largest_sequence: 0,
+        }
+    }
+
+    fn name(&self) -> &CStr {
+        c"panicking-factory"
+    }
+}
+
+struct ReadablePanickingCollector {
+    largest_sequence: u64,
+    readable_calls: Arc<AtomicUsize>,
+}
+
+impl TablePropertiesCollector for ReadablePanickingCollector {
+    fn name(&self) -> &CStr {
+        c"readable-panicking-collector"
+    }
+
+    fn add(
+        &mut self,
+        _key: &[u8],
+        _value: &[u8],
+        _entry_type: DBEntryType,
+        sequence: u64,
+        _file_size: u64,
+    ) {
+        self.largest_sequence = self.largest_sequence.max(sequence);
+    }
+
+    fn finish(&mut self) -> HashMap<Vec<u8>, Vec<u8>> {
+        HashMap::from([(
+            KIWI_PROPERTY_KEY.to_vec(),
+            format!("17/{}", self.largest_sequence).into_bytes(),
+        )])
+    }
+
+    fn get_readable_properties(&self) -> HashMap<Vec<u8>, Vec<u8>> {
+        self.readable_calls.fetch_add(1, Ordering::SeqCst);
+        panic!("readable properties panic");
+    }
+}
+
+struct ReadablePanickingFactory {
+    readable_calls: Arc<AtomicUsize>,
+}
+
+impl TablePropertiesCollectorFactory for ReadablePanickingFactory {
+    type Collector = ReadablePanickingCollector;
+
+    fn create(&self, _context: TablePropertiesCollectorContext) -> Self::Collector {
+        ReadablePanickingCollector {
+            largest_sequence: 0,
+            readable_calls: Arc::clone(&self.readable_calls),
+        }
+    }
+
+    fn name(&self) -> &CStr {
+        c"readable-panicking-factory"
+    }
+}
+
+struct DropPanickingFactory {
+    drops: Arc<AtomicUsize>,
+}
+
+impl TablePropertiesCollectorFactory for DropPanickingFactory {
+    type Collector = ProbeCollector;
+
+    fn create(&self, _context: TablePropertiesCollectorContext) -> Self::Collector {
+        ProbeCollector
+    }
+
+    fn name(&self) -> &CStr {
+        c"drop-panicking-factory"
+    }
+}
+
+impl Drop for DropPanickingFactory {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+        panic!("factory drop panic");
+    }
+}
+
+struct DropPanickingCollector {
+    drops: Arc<AtomicUsize>,
+}
+
+impl TablePropertiesCollector for DropPanickingCollector {
+    fn name(&self) -> &CStr {
+        c"drop-panicking-collector"
+    }
+
+    fn add(
+        &mut self,
+        _key: &[u8],
+        _value: &[u8],
+        _entry_type: DBEntryType,
+        _sequence: u64,
+        _file_size: u64,
+    ) {
+    }
+
+    fn finish(&mut self) -> HashMap<Vec<u8>, Vec<u8>> {
+        HashMap::from([(KIWI_PROPERTY_KEY.to_vec(), b"17/1".to_vec())])
+    }
+}
+
+impl Drop for DropPanickingCollector {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+        panic!("collector drop panic");
+    }
+}
+
+struct DropPanickingCollectorFactory {
+    drops: Arc<AtomicUsize>,
+}
+
+impl TablePropertiesCollectorFactory for DropPanickingCollectorFactory {
+    type Collector = DropPanickingCollector;
+
+    fn create(&self, _context: TablePropertiesCollectorContext) -> Self::Collector {
+        DropPanickingCollector {
+            drops: Arc::clone(&self.drops),
+        }
+    }
+
+    fn name(&self) -> &CStr {
+        c"drop-panicking-collector-factory"
+    }
+}
+
+fn prepare_fail_fast_database(path: &Path) {
+    let mut options = Options::default();
+    options.create_if_missing(true);
+    options.set_table_properties_collector_factory(SequenceFactory);
+    let db = DB::open(&options, path).expect("create fail-fast test database");
+    db.put(b"baseline-key", b"baseline-value")
+        .expect("write fail-fast baseline value");
+    db.flush().expect("flush fail-fast baseline SST");
+}
+
+fn assert_all_installed_ssts_have_kiwi_property(path: &Path) {
+    let options = Options::default();
+    let db = DB::open_for_read_only(&options, path, false)
+        .expect("reopen database read-only after collector child abort");
+    let collection = db
+        .get_properties_of_all_tables()
+        .expect("read table properties after collector child abort");
+    assert!(
+        !collection.is_empty(),
+        "the prepared baseline SST must remain installed"
+    );
+    for (file_name, properties) in collection.iter() {
+        assert!(
+            properties
+                .user_collected_properties()
+                .contains_key(KIWI_PROPERTY_KEY),
+            "installed SST {file_name:?} is missing the Kiwi recovery property"
+        );
+    }
+}
+
+fn assert_collector_panic_fails_fast(case: &str) {
+    let path = DBPath::new("_rust_rocksdb_collector_fail_fast");
+    let path_ref = &path;
+    let db_path: &Path = path_ref.as_ref();
+    prepare_fail_fast_database(db_path);
+
+    let output = Command::new(env::current_exe().expect("locate current test executable"))
+        .args(["--exact", "collector_subprocess_entry", "--nocapture"])
+        .env(COLLECTOR_PANIC_CASE_ENV, case)
+        .env(COLLECTOR_PANIC_DB_ENV, db_path)
+        .output()
+        .expect("run collector panic child process");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "collector panic child unexpectedly succeeded; stdout={stdout}; stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(CHILD_STARTED_MARKER),
+        "collector panic child did not reach its marked entry point; stdout={stdout}; stderr={stderr}"
+    );
+    assert!(
+        !stdout.contains(FLUSH_SUCCEEDED_MARKER),
+        "flush returned successfully after a critical collector panic; stdout={stdout}; stderr={stderr}"
+    );
+
+    assert_all_installed_ssts_have_kiwi_property(db_path);
+}
+
 fn assert_collector_contract<T: TablePropertiesCollector + Send + 'static>() {}
 fn assert_factory_contract<T: TablePropertiesCollectorFactory + Send + Sync + 'static>() {}
+
+#[test]
+fn collector_subprocess_entry() {
+    let Ok(case) = env::var(COLLECTOR_PANIC_CASE_ENV) else {
+        return;
+    };
+    let db_path = env::var_os(COLLECTOR_PANIC_DB_ENV)
+        .expect("collector panic child database path must be provided");
+
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{CHILD_STARTED_MARKER}").expect("write child start marker");
+    stdout.flush().expect("flush child start marker");
+    drop(stdout);
+
+    let mut options = Options::default();
+    options.set_table_properties_collector_factory(PanickingFactory {
+        case: PanicCase::from_env(&case),
+    });
+    let db = DB::open(&options, &db_path).expect("open collector panic child database");
+    db.put(b"panic-key", b"panic-value")
+        .expect("write collector panic child value");
+    db.flush()
+        .expect("critical collector panic must not return from flush");
+
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{FLUSH_SUCCEEDED_MARKER}").expect("write flush success marker");
+    stdout.flush().expect("flush success marker");
+}
+
+#[test]
+fn fail_fast_factory_create_panic_aborts_before_installing_an_unprotected_sst() {
+    assert_collector_panic_fails_fast("factory_create");
+}
+
+#[test]
+fn fail_fast_collector_name_panic_aborts_before_installing_an_unprotected_sst() {
+    assert_collector_panic_fails_fast("collector_name");
+}
+
+#[test]
+fn fail_fast_collector_add_panic_aborts_before_installing_an_unprotected_sst() {
+    assert_collector_panic_fails_fast("add");
+}
+
+#[test]
+fn fail_fast_collector_finish_panic_aborts_before_installing_an_unprotected_sst() {
+    assert_collector_panic_fails_fast("finish");
+}
+
+#[test]
+fn readable_panic_keeps_binary_property_and_degrades_readable_properties_to_empty() {
+    let path = DBPath::new("_rust_rocksdb_collector_readable_panic");
+    let readable_calls = Arc::new(AtomicUsize::new(0));
+    let mut options = Options::default();
+    options.create_if_missing(true);
+    options.set_table_properties_collector_factory(ReadablePanickingFactory {
+        readable_calls: Arc::clone(&readable_calls),
+    });
+    let db = DB::open(&options, &path).expect("open readable panic test database");
+    db.put(b"key", b"value")
+        .expect("write readable panic test value");
+    db.flush().expect("flush despite readable properties panic");
+
+    let collection = db
+        .get_properties_of_all_tables()
+        .expect("read properties after readable callback panic");
+    assert_eq!(collection.len(), 1);
+    let (_, properties) = collection
+        .iter()
+        .next()
+        .expect("readable panic test must install one SST");
+    assert_eq!(
+        properties.user_collected_properties()[KIWI_PROPERTY_KEY],
+        b"17/1"
+    );
+    assert!(
+        readable_calls.load(Ordering::SeqCst) > 0,
+        "RocksDB must execute the injected readable-properties panic path"
+    );
+    assert!(properties.readable_properties().is_empty());
+}
+
+#[test]
+fn drop_panic_factory_is_caught_and_factory_is_dropped_once() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut options = Options::default();
+    options.set_table_properties_collector_factory(DropPanickingFactory {
+        drops: Arc::clone(&drops),
+    });
+
+    drop(options);
+
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn drop_panic_collector_is_caught_and_collector_is_dropped_once() {
+    let path = DBPath::new("_rust_rocksdb_collector_drop_panic");
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut options = Options::default();
+    options.create_if_missing(true);
+    options.set_table_properties_collector_factory(DropPanickingCollectorFactory {
+        drops: Arc::clone(&drops),
+    });
+    let db = DB::open(&options, &path).expect("open collector drop panic test database");
+    db.put(b"key", b"value")
+        .expect("write collector drop panic test value");
+
+    db.flush().expect("flush despite collector drop panic");
+
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
 
 #[test]
 fn collector_and_factory_have_the_required_thread_contracts() {
