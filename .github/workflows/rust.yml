@@ -161,11 +161,14 @@ jobs:
     name: Linux (system RocksDB)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      contents: read
     steps:
       - name: Checkout sources
         uses: actions/checkout@v5
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
