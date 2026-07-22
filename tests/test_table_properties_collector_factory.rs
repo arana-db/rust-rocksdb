@@ -45,6 +45,8 @@ const KIWI_PROPERTY_KEY: &[u8] = b"LargestLogIndex/LargestSequenceNumber";
 const COLLECTOR_ID_PROPERTY_KEY: &[u8] = b"test.collector-id";
 const COLLECTOR_PANIC_CASE_ENV: &str = "RUST_ROCKSDB_COLLECTOR_PANIC_CASE";
 const COLLECTOR_PANIC_DB_ENV: &str = "RUST_ROCKSDB_COLLECTOR_PANIC_DB";
+const EXPECTED_COLLECTOR_FACTORY_SUPPORT_ENV: &str =
+    "RUST_ROCKSDB_TEST_EXPECT_COLLECTOR_FACTORY_SUPPORTED";
 const CHILD_STARTED_MARKER: &str = "COLLECTOR_CHILD_STARTED";
 const FLUSH_SUCCEEDED_MARKER: &str = "FLUSH_SUCCEEDED";
 
@@ -586,6 +588,10 @@ fn assert_all_installed_ssts_have_kiwi_property(path: &Path) {
 }
 
 fn assert_collector_panic_fails_fast(case: &str) {
+    if skip_bundled_backend_only_test() {
+        return;
+    }
+
     let path = DBPath::new("_rust_rocksdb_collector_fail_fast");
     let path_ref = &path;
     let db_path: &Path = path_ref.as_ref();
@@ -631,11 +637,32 @@ fn assert_collector_panic_fails_fast(case: &str) {
 fn assert_collector_contract<T: TablePropertiesCollector + Send + 'static>() {}
 fn assert_factory_contract<T: TablePropertiesCollectorFactory + Send + Sync + 'static>() {}
 
+fn collector_factory_is_supported() -> bool {
+    match unsafe {
+        rust_librocksdb_sys::rust_rocksdb_table_properties_collector_factory_supported()
+    } {
+        0 => false,
+        1 => true,
+        other => panic!("unexpected collector factory capability value: {other}"),
+    }
+}
+
+fn skip_bundled_backend_only_test() -> bool {
+    let skip = !collector_factory_is_supported();
+    if skip {
+        eprintln!("skipping bundled-backend-only collector factory test");
+    }
+    skip
+}
+
 #[test]
 fn collector_subprocess_entry() {
     let Ok(case) = env::var(COLLECTOR_PANIC_CASE_ENV) else {
         return;
     };
+    if skip_bundled_backend_only_test() {
+        return;
+    }
     let db_path = env::var_os(COLLECTOR_PANIC_DB_ENV)
         .expect("collector panic child database path must be provided");
 
@@ -681,6 +708,10 @@ fn fail_fast_collector_finish_panic_aborts_before_installing_an_unprotected_sst(
 
 #[test]
 fn readable_panic_keeps_binary_property_and_degrades_readable_properties_to_empty() {
+    if skip_bundled_backend_only_test() {
+        return;
+    }
+
     let path = DBPath::new("_rust_rocksdb_collector_readable_panic");
     let readable_calls = Arc::new(AtomicUsize::new(0));
     let mut options = Options::default();
@@ -714,6 +745,10 @@ fn readable_panic_keeps_binary_property_and_degrades_readable_properties_to_empt
 
 #[test]
 fn drop_panic_factory_is_caught_and_factory_is_dropped_once() {
+    if skip_bundled_backend_only_test() {
+        return;
+    }
+
     let drops = Arc::new(AtomicUsize::new(0));
     let mut options = Options::default();
     options.set_table_properties_collector_factory(DropPanickingFactory {
@@ -727,6 +762,10 @@ fn drop_panic_factory_is_caught_and_factory_is_dropped_once() {
 
 #[test]
 fn drop_panic_collector_is_caught_and_collector_is_dropped_once() {
+    if skip_bundled_backend_only_test() {
+        return;
+    }
+
     let path = DBPath::new("_rust_rocksdb_collector_drop_panic");
     let drops = Arc::new(AtomicUsize::new(0));
     let mut options = Options::default();
@@ -794,12 +833,19 @@ fn readable_properties_default_to_empty() {
 
 #[test]
 fn collector_factory_capability_matches_the_selected_backend() {
-    let supported =
-        unsafe { rust_librocksdb_sys::rust_rocksdb_table_properties_collector_factory_supported() };
+    let supported = collector_factory_is_supported();
+    if let Ok(expected) = env::var(EXPECTED_COLLECTOR_FACTORY_SUPPORT_ENV) {
+        let expected = match expected.as_str() {
+            "0" => false,
+            "1" => true,
+            other => panic!("unexpected {EXPECTED_COLLECTOR_FACTORY_SUPPORT_ENV} value: {other}"),
+        };
+        assert_eq!(supported, expected);
+    }
 
     match supported {
-        1 => {}
-        0 => {
+        true => {}
+        false => {
             let observations = Arc::new(UnsupportedFactoryObservations::default());
             let mut options = Options::default();
             let result = catch_unwind(AssertUnwindSafe(|| {
@@ -823,12 +869,15 @@ fn collector_factory_capability_matches_the_selected_backend() {
             assert_eq!(observations.name_calls.load(Ordering::SeqCst), 0);
             assert_eq!(observations.drops.load(Ordering::SeqCst), 1);
         }
-        other => panic!("unexpected collector factory capability value: {other}"),
     }
 }
 
 #[test]
 fn collector_factory_writes_kiwi_property_bytes_during_flush() {
+    if skip_bundled_backend_only_test() {
+        return;
+    }
+
     let path = DBPath::new("_rust_rocksdb_table_properties_collector_factory");
     let mut options = Options::default();
     options.create_if_missing(true);
@@ -856,6 +905,10 @@ fn collector_factory_writes_kiwi_property_bytes_during_flush() {
 
 #[test]
 fn context_real_flush_preserves_entry_arguments_and_all_context_fields() {
+    if skip_bundled_backend_only_test() {
+        return;
+    }
+
     let path = DBPath::new("_rust_rocksdb_collector_context_arguments");
     let observations = Arc::new(CallbackObservations::default());
     let mut block_options = BlockBasedOptions::default();
@@ -955,6 +1008,10 @@ fn context_real_flush_preserves_entry_arguments_and_all_context_fields() {
 
 #[test]
 fn concurrent_multi_cf_flush_keeps_collector_properties_isolated() {
+    if skip_bundled_backend_only_test() {
+        return;
+    }
+
     let path = DBPath::new("_rust_rocksdb_collector_concurrent_multi_cf");
     let counts = Arc::new(LifecycleCounts::default());
     let mut options = Options::default();
@@ -1000,6 +1057,10 @@ fn concurrent_multi_cf_flush_keeps_collector_properties_isolated() {
 
 #[test]
 fn drop_options_clone_and_multi_cf_db_release_factory_and_collectors_once() {
+    if skip_bundled_backend_only_test() {
+        return;
+    }
+
     let path = DBPath::new("_rust_rocksdb_collector_drop_normal");
     let counts = Arc::new(LifecycleCounts::default());
     let mut original_options = Options::default();
@@ -1049,6 +1110,10 @@ fn drop_options_clone_and_multi_cf_db_release_factory_and_collectors_once() {
 
 #[test]
 fn drop_failed_open_releases_factory_once_without_creating_collector() {
+    if skip_bundled_backend_only_test() {
+        return;
+    }
+
     let invalid_db_path = tempfile::NamedTempFile::new().expect("create invalid DB file path");
     let counts = Arc::new(LifecycleCounts::default());
     let mut options = Options::default();

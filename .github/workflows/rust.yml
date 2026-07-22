@@ -149,11 +149,90 @@ jobs:
           chmod -R a+w target Cargo.lock
 
       - name: Run rocksdb tests
+        env:
+          RUST_ROCKSDB_TEST_EXPECT_COLLECTOR_FACTORY_SUPPORTED: "1"
         run: cargo nextest run --all
 
       - name: Mark working directory as writable
         if: runner.os == 'Linux'
         run: chmod -R a+w .
+
+  test-system-rocksdb:
+    name: Linux (system RocksDB)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-key: "v1-rust-system-rocksdb"
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            libclang-dev \
+            cmake \
+            ninja-build
+
+      - name: Build pinned RocksDB as a shared system library
+        run: |
+          cmake \
+            -S librocksdb-sys/rocksdb \
+            -B target/system-rocksdb \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DROCKSDB_BUILD_SHARED=ON \
+            -DPORTABLE=ON \
+            -DUSE_RTTI=ON \
+            -DWITH_TESTS=OFF \
+            -DWITH_BENCHMARK_TOOLS=OFF \
+            -DWITH_CORE_TOOLS=OFF \
+            -DWITH_TOOLS=OFF \
+            -DWITH_TRACE_TOOLS=OFF \
+            -DWITH_GFLAGS=OFF \
+            -DWITH_JEMALLOC=OFF \
+            -DWITH_LIBURING=OFF \
+            -DWITH_SNAPPY=OFF \
+            -DWITH_LZ4=OFF \
+            -DWITH_ZLIB=OFF \
+            -DWITH_ZSTD=OFF \
+            -DWITH_BZ2=OFF \
+            -DFAIL_ON_WARNINGS=OFF
+
+          cmake \
+            --build target/system-rocksdb \
+            --target rocksdb-shared \
+            --parallel 2
+
+      - name: Verify system library artifacts
+        run: |
+          test -f target/system-rocksdb/librocksdb.so
+          test -f librocksdb-sys/rocksdb/include/rocksdb/c.h
+          readlink -f target/system-rocksdb/librocksdb.so
+          ldd target/system-rocksdb/librocksdb.so
+
+      - name: Run collector tests against system RocksDB
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/system-rocksdb-cargo
+          ROCKSDB_LIB_DIR: ${{ github.workspace }}/target/system-rocksdb
+          ROCKSDB_INCLUDE_DIR: ${{ github.workspace }}/librocksdb-sys/rocksdb/include
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/system-rocksdb
+          RUST_ROCKSDB_TEST_EXPECT_COLLECTOR_FACTORY_SUPPORTED: "0"
+        run: |
+          cargo test \
+            --no-default-features \
+            --features bindgen-runtime \
+            --test test_table_properties_collector_factory \
+            -- --nocapture
 
   test-multi-threaded-cf:
     name: ${{ matrix.build }} (multi-threaded-cf)
@@ -202,6 +281,8 @@ jobs:
           chmod -R a+w target Cargo.lock
 
       - name: Run rocksdb tests (multi-threaded-cf)
+        env:
+          RUST_ROCKSDB_TEST_EXPECT_COLLECTOR_FACTORY_SUPPORTED: "1"
         run: cargo nextest run --all --features multi-threaded-cf
 
       - name: Mark working directory as writable
