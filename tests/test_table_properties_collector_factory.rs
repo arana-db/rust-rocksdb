@@ -17,6 +17,7 @@ use std::{
     env,
     ffi::{CStr, CString},
     io::{self, Write},
+    panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
     process::Command,
     sync::{
@@ -190,6 +191,35 @@ impl TablePropertiesCollectorFactory for CountingFactory {
 impl Drop for CountingFactory {
     fn drop(&mut self) {
         self.counts.factories_dropped.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[derive(Default)]
+struct UnsupportedFactoryObservations {
+    name_calls: AtomicUsize,
+    drops: AtomicUsize,
+}
+
+struct UnsupportedFactory {
+    observations: Arc<UnsupportedFactoryObservations>,
+}
+
+impl TablePropertiesCollectorFactory for UnsupportedFactory {
+    type Collector = ProbeCollector;
+
+    fn create(&self, _context: TablePropertiesCollectorContext) -> Self::Collector {
+        ProbeCollector
+    }
+
+    fn name(&self) -> &CStr {
+        self.observations.name_calls.fetch_add(1, Ordering::SeqCst);
+        c"unsupported-factory"
+    }
+}
+
+impl Drop for UnsupportedFactory {
+    fn drop(&mut self) {
+        self.observations.drops.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -763,11 +793,38 @@ fn readable_properties_default_to_empty() {
 }
 
 #[test]
-fn bundled_backend_reports_support() {
+fn collector_factory_capability_matches_the_selected_backend() {
     let supported =
         unsafe { rust_librocksdb_sys::rust_rocksdb_table_properties_collector_factory_supported() };
 
-    assert_eq!(supported, 1);
+    match supported {
+        1 => {}
+        0 => {
+            let observations = Arc::new(UnsupportedFactoryObservations::default());
+            let mut options = Options::default();
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                options.set_table_properties_collector_factory(UnsupportedFactory {
+                    observations: Arc::clone(&observations),
+                });
+            }));
+
+            let panic = result.expect_err("the system backend must fail closed");
+            let message = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&'static str>().copied())
+                .expect("the fail-closed panic must contain a string message");
+            assert!(
+                message.contains(
+                    "TablePropertiesCollectorFactory requires the bundled RocksDB backend"
+                ),
+                "unexpected fail-closed panic: {message}"
+            );
+            assert_eq!(observations.name_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(observations.drops.load(Ordering::SeqCst), 1);
+        }
+        other => panic!("unexpected collector factory capability value: {other}"),
+    }
 }
 
 #[test]
