@@ -186,7 +186,42 @@ jobs:
             cmake \
             ninja-build
 
+      - name: Compute exact system RocksDB cache key
+        id: system-rocksdb-cache-key
+        env:
+          RUNNER_OS_NAME: ${{ runner.os }}
+          RUNNER_ARCH_NAME: ${{ runner.arch }}
+        run: |
+          cxx="${CXX:-c++}"
+          rocksdb_commit="$(git -C librocksdb-sys/rocksdb rev-parse HEAD)"
+          workflow_sha256="$(sha256sum .github/workflows/rust.yml | cut -d ' ' -f 1)"
+
+          {
+            printf 'runner.os=%s\n' "$RUNNER_OS_NAME"
+            printf 'runner.arch=%s\n' "$RUNNER_ARCH_NAME"
+            printf 'rocksdb.commit=%s\n' "$rocksdb_commit"
+            printf 'cxx.path=%s\n' "$(command -v "$cxx")"
+            "$cxx" --version
+            cmake --version
+            ninja --version
+            printf 'workflow.sha256=%s\n' "$workflow_sha256"
+          } > "$RUNNER_TEMP/system-rocksdb-cache-key.txt"
+
+          cache_digest="$(sha256sum "$RUNNER_TEMP/system-rocksdb-cache-key.txt" | cut -d ' ' -f 1)"
+          printf 'key=system-rocksdb-%s-%s-%s\n' \
+            "$RUNNER_OS_NAME" \
+            "$RUNNER_ARCH_NAME" \
+            "$cache_digest" >> "$GITHUB_OUTPUT"
+
+      - name: Restore exact system RocksDB build
+        id: system-rocksdb-cache
+        uses: actions/cache@v4
+        with:
+          path: target/system-rocksdb
+          key: ${{ steps.system-rocksdb-cache-key.outputs.key }}
+
       - name: Build pinned RocksDB as a shared system library
+        if: steps.system-rocksdb-cache.outputs.cache-hit != 'true'
         run: |
           cmake \
             -S librocksdb-sys/rocksdb \
