@@ -351,6 +351,7 @@ mod vendor {
     /// Compile RocksDB from the bundled submodule sources.
     pub(super) fn build(target: &Target) {
         let mut cfg = base_cfg(target);
+        cfg.define("RUST_ROCKSDB_COLLECTOR_FACTORY_SUPPORTED", Some("1"));
 
         apply_compression_features(&mut cfg);
         apply_optional_features(&mut cfg, target);
@@ -1461,6 +1462,7 @@ mod extensions {
     /// backend folds the same source into `librocksdb.a` directly.
     pub(super) fn build_for_system_backend(target: &Target, backend: &Backend) {
         let mut cfg = cc::Build::new();
+        cfg.define("RUST_ROCKSDB_COLLECTOR_FACTORY_SUPPORTED", Some("0"));
 
         // The extension references types from `rocksdb/options.h` and
         // `rocksdb/table.h`, plus the opaque-handle types from
