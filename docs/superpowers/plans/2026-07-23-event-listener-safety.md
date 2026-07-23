@@ -325,8 +325,13 @@ CARGO_TARGET_DIR=/tmp/rust-rocksdb-event-listener-target cargo test --test test_
 逐项核对设计目标、API 兼容、unsafe 依据、panic 策略、测试变异强度、同步文档和
 无关 Diff。P0/P1 未清零前不得 push。
 
-- [ ] **步骤 6：实时刷新 Base 并创建替代 PR**
+- [x] **步骤 6：实时刷新 Base 并创建替代 PR**
 
 重新获取 `arana-db/master`。若 Base 前移，rebase 后重跑受影响门禁。然后 push
 `codex/event-listener-safety`，创建 ready-for-review PR。PR 正文说明旧 PR #1 已被
 当前基线功能覆盖，新 PR 只做安全加固和同步记录；不关闭 PR #1。
+
+执行记录（2026-07-23）：Base 保持
+`9e0de262bd378c84dcef4a226fed1217051fc5c5`，分支已推送，并创建 ready-for-review
+PR [#9](https://github.com/arana-db/rust-rocksdb/pull/9)。PR #1 在本任务交付前已经关闭，
+本任务没有执行关闭操作。
