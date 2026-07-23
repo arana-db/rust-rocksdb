@@ -1785,9 +1785,31 @@ impl Options {
         self.outlive.compaction_filter = Some(Arc::new(filter));
     }
 
-    pub fn add_event_listener<L: EventListener>(&mut self, l: L) {
+    /// Adds an event listener that RocksDB may retain after this call returns.
+    ///
+    /// A listener cannot borrow state owned by the calling stack:
+    ///
+    /// ```compile_fail,E0597
+    /// use std::sync::atomic::AtomicUsize;
+    ///
+    /// use rust_rocksdb::{Options, event_listener::EventListener};
+    ///
+    /// struct BorrowingListener<'a> {
+    ///     _events: &'a AtomicUsize,
+    /// }
+    ///
+    /// impl EventListener for BorrowingListener<'_> {}
+    ///
+    /// let events = AtomicUsize::new(0);
+    /// let mut options = Options::default();
+    /// options.add_event_listener(BorrowingListener { _events: &events });
+    /// ```
+    pub fn add_event_listener<L>(&mut self, l: L)
+    where
+        L: EventListener + 'static,
+    {
         let handle = new_event_listener(l);
-        unsafe { ffi::rust_rocksdb_options_add_eventlistener(self.inner, handle.inner) }
+        unsafe { ffi::rust_rocksdb_options_add_eventlistener(self.inner, handle.into_raw()) }
     }
 
     /// Sets the factory used to create a collector for each RocksDB table build.

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- breaking(event-listener): `EventListener::on_background_error` now receives
+  `status: &MutableStatus` instead of `status: MutableStatus`; downstream
+  `EventListener` implementations must update their method signature. Listener
+  registration now requires `'static`, every listener callback and destructor
+  aborts with a fixed diagnostic if user code panics, and the public low-level
+  `DBEventListener`/`new_event_listener` API remains available while its native
+  handle is released exactly once by RAII unless ownership is transferred to
+  RocksDB.
+
 ## 0.51.0 (2026-06-26)
 
 - fix(librocksdb-sys): upgrade the bundled RocksDB submodule to
