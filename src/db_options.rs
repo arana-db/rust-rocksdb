@@ -1809,7 +1809,7 @@ impl Options {
         L: EventListener + 'static,
     {
         let handle = new_event_listener(l);
-        unsafe { ffi::rust_rocksdb_options_add_eventlistener(self.inner, handle.inner) }
+        unsafe { ffi::rust_rocksdb_options_add_eventlistener(self.inner, handle.into_raw()) }
     }
 
     /// Sets the factory used to create a collector for each RocksDB table build.

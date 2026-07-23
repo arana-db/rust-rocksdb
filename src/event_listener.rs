@@ -793,17 +793,38 @@ extern "C" fn on_error_recovery_end<E: EventListener>(
     ctx.on_error_recovery_end(&info);
 }
 
-pub(crate) struct DBEventListener {
-    pub(crate) inner: *mut ffi::rust_rocksdb_eventlistener_t,
+pub(crate) struct EventListenerHandle {
+    inner: *mut ffi::rust_rocksdb_eventlistener_t,
+    owned: bool,
 }
 
-pub(crate) fn new_event_listener<E>(e: E) -> DBEventListener
+impl EventListenerHandle {
+    pub(crate) fn into_raw(mut self) -> *mut ffi::rust_rocksdb_eventlistener_t {
+        self.owned = false;
+        self.inner
+    }
+}
+
+impl Drop for EventListenerHandle {
+    fn drop(&mut self) {
+        if self.owned && !self.inner.is_null() {
+            // SAFETY: `inner` came from `rust_rocksdb_eventlistener_create`.
+            // `owned` is true only before `into_raw` transfers ownership, and
+            // this handle is not `Clone`, so this is its unique, exactly-once destroy.
+            unsafe {
+                ffi::rust_rocksdb_eventlistener_destroy(self.inner);
+            }
+        }
+    }
+}
+
+pub(crate) fn new_event_listener<E>(e: E) -> EventListenerHandle
 where
     E: EventListener + 'static,
 {
     let p: Box<E> = Box::new(e);
     unsafe {
-        DBEventListener {
+        EventListenerHandle {
             // WARNING: none of the callbacks below are actually optional.
             // Rocksdb will try calling the callback as long as there is an
             // event listener setup, this means we must define all of them
@@ -823,6 +844,39 @@ where
                 Some(on_stall_conditions_changed::<E>),
                 Some(on_memtable_sealed::<E>),
             ),
+            owned: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{EventListener, new_event_listener};
+
+    struct DropCountingListener {
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl EventListener for DropCountingListener {}
+
+    impl Drop for DropCountingListener {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn event_listener_handle_drops_unregistered_listener() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let handle = new_event_listener(DropCountingListener {
+            drops: drops.clone(),
+        });
+
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(handle);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 }

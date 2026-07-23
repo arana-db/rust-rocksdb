@@ -121,6 +121,23 @@ impl EventListener for BackgroundErrorCounter {
     }
 }
 
+struct OwnershipListener {
+    callbacks: Arc<AtomicUsize>,
+    drops: Arc<AtomicUsize>,
+}
+
+impl EventListener for OwnershipListener {
+    fn on_flush_completed(&self, _: &FlushJobInfo) {
+        self.callbacks.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl Drop for OwnershipListener {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 #[test]
 fn test_event_listener_stall_conditions_changed() {
     let path = DBPath::new("_rust_rocksdb_event_listener_stall_conditions");
@@ -207,6 +224,33 @@ fn test_event_listener_basic() {
         counter.input_bytes.load(Ordering::SeqCst) > counter.output_bytes.load(Ordering::SeqCst)
     );
     assert_eq!(counter.manual_compaction.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn test_event_listener_ownership_survives_options_drop() {
+    let path = DBPath::new("_rust_rocksdb_event_listener_ownership");
+    let callbacks = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    let mut opts = Options::default();
+    opts.create_if_missing(true);
+    opts.add_event_listener(OwnershipListener {
+        callbacks: callbacks.clone(),
+        drops: drops.clone(),
+    });
+
+    let db = DB::open(&opts, &path).unwrap();
+    drop(opts);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+    db.put(b"key", b"value").unwrap();
+    let mut flush_opts = FlushOptions::default();
+    flush_opts.set_wait(true);
+    db.flush_opt(&flush_opts).unwrap();
+    assert_ne!(callbacks.load(Ordering::SeqCst), 0);
+
+    drop(db);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
 #[test]
