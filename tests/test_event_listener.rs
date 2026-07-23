@@ -116,7 +116,7 @@ struct BackgroundErrorCounter {
 }
 
 impl EventListener for BackgroundErrorCounter {
-    fn on_background_error(&self, _: DBBackgroundErrorReason, _: MutableStatus) {
+    fn on_background_error(&self, _: DBBackgroundErrorReason, _: &MutableStatus) {
         self.background_error.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -256,7 +256,7 @@ impl Default for BackgroundErrorCleaner {
 }
 
 impl EventListener for BackgroundErrorCleaner {
-    fn on_background_error(&self, _: DBBackgroundErrorReason, s: MutableStatus) {
+    fn on_background_error(&self, _: DBBackgroundErrorReason, s: &MutableStatus) {
         assert!(s.result().is_err());
         self.severity.store(s.severity() as usize, Ordering::SeqCst);
         s.reset();

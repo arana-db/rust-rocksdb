@@ -625,7 +625,34 @@ pub trait EventListener: Send + Sync {
     fn on_external_file_ingested(&self, _: &IngestionInfo) {}
     fn on_stall_conditions_changed(&self, _: &WriteStallInfo) {}
     fn on_memtable_sealed(&self, _: &MemTableInfo) {}
-    fn on_background_error(&self, _: DBBackgroundErrorReason, _: MutableStatus) {}
+    /// The mutable status is valid only while this callback is running.
+    ///
+    /// It cannot be moved into storage that outlives the callback:
+    ///
+    /// ```compile_fail,E0521
+    /// use std::cell::RefCell;
+    ///
+    /// use rust_rocksdb::event_listener::{
+    ///     DBBackgroundErrorReason, EventListener, MutableStatus,
+    /// };
+    ///
+    /// thread_local! {
+    ///     static SAVED_STATUS: RefCell<Option<&'static MutableStatus>> = RefCell::new(None);
+    /// }
+    ///
+    /// struct RetainingListener;
+    ///
+    /// impl EventListener for RetainingListener {
+    ///     fn on_background_error(
+    ///         &self,
+    ///         _: DBBackgroundErrorReason,
+    ///         status: &MutableStatus,
+    ///     ) {
+    ///         SAVED_STATUS.with(|saved| saved.replace(Some(status)));
+    ///     }
+    /// }
+    /// ```
+    fn on_background_error(&self, _: DBBackgroundErrorReason, _: &MutableStatus) {}
     fn on_error_recovery_begin(
         &self,
         _: DBBackgroundErrorReason,
@@ -733,7 +760,7 @@ extern "C" fn on_background_error<E: EventListener>(
         result: status_result(status_ptr),
         ptr: status_ptr,
     };
-    ctx.on_background_error(DBBackgroundErrorReason::from(reason), status);
+    ctx.on_background_error(DBBackgroundErrorReason::from(reason), &status);
 }
 
 extern "C" fn on_error_recovery_begin<E: EventListener>(
@@ -766,11 +793,14 @@ extern "C" fn on_error_recovery_end<E: EventListener>(
     ctx.on_error_recovery_end(&info);
 }
 
-pub struct DBEventListener {
+pub(crate) struct DBEventListener {
     pub(crate) inner: *mut ffi::rust_rocksdb_eventlistener_t,
 }
 
-pub fn new_event_listener<E: EventListener>(e: E) -> DBEventListener {
+pub(crate) fn new_event_listener<E>(e: E) -> DBEventListener
+where
+    E: EventListener + 'static,
+{
     let p: Box<E> = Box::new(e);
     unsafe {
         DBEventListener {
