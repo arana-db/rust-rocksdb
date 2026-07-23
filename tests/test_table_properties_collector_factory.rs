@@ -16,19 +16,27 @@ use std::{
     collections::HashMap,
     env,
     ffi::{CStr, CString},
-    io::{self, Write},
+    fs,
+    io::{self, Read, Write},
     panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
-    process::Command,
+    process::{Child, Command, ExitStatus, Output, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
+        mpsc,
     },
+    thread,
+    time::{Duration, Instant},
 };
 
 use rust_rocksdb::{
-    BlockBasedOptions, ColumnFamilyDescriptor, DB, FlushOptions, MergeOperands, Options,
-    WriteBatch,
+    BlockBasedOptions, BottommostLevelCompaction, ColumnFamilyDescriptor, CompactOptions, DB, Env,
+    FlushOptions, MergeOperands, Options, WriteBatch,
+    event_listener::{
+        CompactionJobInfo, DBCompactionReason, DBFlushReason, EventListener, FlushJobInfo,
+    },
+    properties::{NUM_ENTRIES_ACTIVE_MEM_TABLE, num_files_at_level},
     table_properties_collector::{
         DBEntryType, TablePropertiesCollector, TablePropertiesCollectorCallback,
     },
@@ -49,6 +57,15 @@ const EXPECTED_COLLECTOR_FACTORY_SUPPORT_ENV: &str =
     "RUST_ROCKSDB_TEST_EXPECT_COLLECTOR_FACTORY_SUPPORTED";
 const CHILD_STARTED_MARKER: &str = "COLLECTOR_CHILD_STARTED";
 const FLUSH_SUCCEEDED_MARKER: &str = "FLUSH_SUCCEEDED";
+const OVERLAP_CHILD_ENV: &str = "RUST_ROCKSDB_COLLECTOR_OVERLAP_CHILD";
+const OVERLAP_CHILD_DB_ENV: &str = "RUST_ROCKSDB_COLLECTOR_OVERLAP_DB";
+const OVERLAP_CHILD_STARTED_MARKER: &str = "COLLECTOR_OVERLAP_CHILD_STARTED";
+const OVERLAP_CHILD_SUCCEEDED_MARKER: &str = "COLLECTOR_OVERLAP_CHILD_SUCCEEDED";
+const WATCHDOG_POLL_ERROR_CHILD_ENV: &str = "RUST_ROCKSDB_WATCHDOG_POLL_ERROR_CHILD";
+const WATCHDOG_POLL_ERROR_STARTED_PATH_ENV: &str = "RUST_ROCKSDB_WATCHDOG_POLL_ERROR_STARTED_PATH";
+const WATCHDOG_POLL_ERROR_PARTIAL_MARKER: &str = "WATCHDOG_POLL_ERROR_CHILD";
+const WATCHDOG_POLL_ERROR_STARTED_MARKER: &str = "WATCHDOG_POLL_ERROR_CHILD_STARTED";
+const INJECTED_POLL_ERROR: &str = "injected child poll error";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObservedEntry {
@@ -196,6 +213,209 @@ impl Drop for CountingFactory {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverlapRole {
+    Flush,
+    Compaction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GatedCreate {
+    role: OverlapRole,
+    context: TablePropertiesCollectorContext,
+    collector_id: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct OverlapGateSnapshot {
+    released: bool,
+    timed_out: bool,
+    in_flight: usize,
+    max_in_flight: usize,
+    flush: Option<GatedCreate>,
+    compaction: Option<GatedCreate>,
+    all_creates: Vec<(TablePropertiesCollectorContext, u64)>,
+}
+
+#[derive(Default)]
+struct OverlapGateState {
+    armed: bool,
+    snapshot: OverlapGateSnapshot,
+}
+
+#[derive(Default)]
+struct OverlapGate {
+    state: Mutex<OverlapGateState>,
+    changed: Condvar,
+}
+
+impl OverlapGate {
+    fn arm(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(!state.armed, "overlap gate must only be armed once");
+        state.armed = true;
+    }
+
+    fn enter(
+        &self,
+        context: TablePropertiesCollectorContext,
+        collector_id: u64,
+        timeout: Duration,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.armed || state.snapshot.released {
+            return;
+        }
+        state.snapshot.all_creates.push((context, collector_id));
+        // This classification is valid only for the controlled two-level,
+        // leveled fixture below. The separate CFs, listener events, and final
+        // LSM layout prove the sources; level 0 is not generally "a flush".
+        let role = match context.level_at_creation {
+            0 => OverlapRole::Flush,
+            1 => OverlapRole::Compaction,
+            _ => return,
+        };
+
+        let slot = match role {
+            OverlapRole::Flush => &mut state.snapshot.flush,
+            OverlapRole::Compaction => &mut state.snapshot.compaction,
+        };
+        if slot.is_some() {
+            return;
+        }
+        *slot = Some(GatedCreate {
+            role,
+            context,
+            collector_id,
+        });
+        state.snapshot.in_flight += 1;
+        state.snapshot.max_in_flight = state.snapshot.max_in_flight.max(state.snapshot.in_flight);
+
+        if state.snapshot.flush.is_some() && state.snapshot.compaction.is_some() {
+            state.snapshot.released = true;
+            self.changed.notify_all();
+        } else {
+            let (new_state, wait_result) = self
+                .changed
+                .wait_timeout_while(state, timeout, |state| !state.snapshot.released)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = new_state;
+            if wait_result.timed_out() && !state.snapshot.released {
+                state.snapshot.timed_out = true;
+                state.snapshot.released = true;
+                self.changed.notify_all();
+            }
+        }
+
+        state.snapshot.in_flight -= 1;
+        self.changed.notify_all();
+    }
+
+    fn force_release(&self) {
+        let mut state = self.state.lock().expect("overlap gate lock poisoned");
+        state.snapshot.released = true;
+        self.changed.notify_all();
+    }
+
+    fn snapshot(&self) -> OverlapGateSnapshot {
+        self.state
+            .lock()
+            .expect("overlap gate lock poisoned")
+            .snapshot
+            .clone()
+    }
+}
+
+struct OverlapFactory {
+    counts: Arc<LifecycleCounts>,
+    gate: Arc<OverlapGate>,
+    gate_timeout: Duration,
+}
+
+impl TablePropertiesCollectorFactory for OverlapFactory {
+    type Collector = CountingCollector;
+
+    fn create(&self, context: TablePropertiesCollectorContext) -> Self::Collector {
+        let id = self.counts.next_collector_id.fetch_add(1, Ordering::SeqCst);
+        self.counts
+            .collectors_created
+            .fetch_add(1, Ordering::SeqCst);
+        self.gate.enter(context, id, self.gate_timeout);
+        CountingCollector {
+            id,
+            counts: Arc::clone(&self.counts),
+        }
+    }
+
+    fn name(&self) -> &CStr {
+        c"overlap-factory"
+    }
+}
+
+impl Drop for OverlapFactory {
+    fn drop(&mut self) {
+        self.counts.factories_dropped.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObservedFlushEvent {
+    cf_name: Option<Vec<u8>>,
+    reason: DBFlushReason,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObservedCompactionEvent {
+    cf_name: Option<Vec<u8>>,
+    reason: DBCompactionReason,
+    status_ok: bool,
+    base_input_level: i32,
+    output_level: i32,
+    input_file_count: usize,
+    output_file_count: usize,
+}
+
+#[derive(Default)]
+struct OverlapEvents {
+    flushes: Mutex<Vec<ObservedFlushEvent>>,
+    compactions: Mutex<Vec<ObservedCompactionEvent>>,
+}
+
+struct OverlapEventListener {
+    events: Arc<OverlapEvents>,
+}
+
+impl EventListener for OverlapEventListener {
+    fn on_flush_completed(&self, info: &FlushJobInfo) {
+        if let Ok(mut flushes) = self.events.flushes.lock() {
+            flushes.push(ObservedFlushEvent {
+                cf_name: info.cf_name(),
+                reason: info.flush_reason(),
+            });
+        }
+    }
+
+    fn on_compaction_completed(&self, info: &CompactionJobInfo) {
+        if let Ok(mut compactions) = self.events.compactions.lock() {
+            compactions.push(ObservedCompactionEvent {
+                cf_name: info.cf_name(),
+                reason: info.compaction_reason(),
+                status_ok: info.status().is_ok(),
+                base_input_level: info.base_input_level(),
+                output_level: info.output_level(),
+                input_file_count: info.input_file_count(),
+                output_file_count: info.output_file_count(),
+            });
+        }
+    }
+}
+
 #[derive(Default)]
 struct UnsupportedFactoryObservations {
     name_calls: AtomicUsize,
@@ -269,6 +489,44 @@ fn collector_id_from_collection(collection: rust_rocksdb::TablePropertiesCollect
             .try_into()
             .expect("collector id property must contain eight bytes"),
     )
+}
+
+fn collector_ids_from_named_cf(db: &DB, name: &str) -> Vec<u64> {
+    let cf = db.cf_handle(name).expect("get named column family handle");
+    let collection = db
+        .get_properties_of_all_tables_cf(&cf)
+        .expect("read named column family table properties");
+    let mut ids = collection
+        .iter()
+        .filter_map(|(_, properties)| {
+            properties
+                .user_collected_properties()
+                .remove(COLLECTOR_ID_PROPERTY_KEY)
+        })
+        .map(|id| {
+            u64::from_le_bytes(
+                id.as_slice()
+                    .try_into()
+                    .expect("collector id property must contain eight bytes"),
+            )
+        })
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids
+}
+
+fn num_files_at_level_cf(db: &DB, name: &str, level: usize) -> u64 {
+    let cf = db.cf_handle(name).expect("get named column family handle");
+    db.property_int_value_cf(&cf, num_files_at_level(level))
+        .expect("read level file-count property")
+        .expect("level file-count property must be present")
+}
+
+fn num_active_memtable_entries_cf(db: &DB, name: &str) -> u64 {
+    let cf = db.cf_handle(name).expect("get named column family handle");
+    db.property_int_value_cf(&cf, NUM_ENTRIES_ACTIVE_MEM_TABLE)
+        .expect("read active memtable entry-count property")
+        .expect("active memtable entry-count property must be present")
 }
 
 struct ProbeCollector;
@@ -653,6 +911,148 @@ fn skip_bundled_backend_only_test() -> bool {
         eprintln!("skipping bundled-backend-only collector factory test");
     }
     skip
+}
+
+#[derive(Debug)]
+struct ChildWatchdogResult {
+    output: Output,
+    timed_out: bool,
+    poll_error: Option<String>,
+    kill_error: Option<String>,
+}
+
+fn wait_for_child_with_watchdog<F>(
+    mut child: Child,
+    timeout: Duration,
+    mut poll: F,
+) -> io::Result<ChildWatchdogResult>
+where
+    F: FnMut(&mut Child) -> io::Result<Option<ExitStatus>>,
+{
+    let deadline = Instant::now() + timeout;
+    let (timed_out, poll_error) = loop {
+        match poll(&mut child) {
+            Ok(Some(_)) => break (false, None),
+            Ok(None) if Instant::now() >= deadline => break (true, None),
+            Ok(None) => {
+                // This sleep only paces the watchdog; child synchronization is
+                // controlled by explicit markers and blocking primitives.
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => break (false, Some(error.to_string())),
+        }
+    };
+    let kill_error = if timed_out || poll_error.is_some() {
+        child.kill().err().map(|error| error.to_string())
+    } else {
+        None
+    };
+    let output = child.wait_with_output()?;
+    Ok(ChildWatchdogResult {
+        output,
+        timed_out,
+        poll_error,
+        kill_error,
+    })
+}
+
+#[test]
+fn child_watchdog_poll_error_subprocess_entry() {
+    if env::var_os(WATCHDOG_POLL_ERROR_CHILD_ENV).is_none() {
+        return;
+    }
+    let started_path = env::var_os(WATCHDOG_POLL_ERROR_STARTED_PATH_ENV)
+        .expect("watchdog poll-error child start-marker path must be provided");
+    fs::write(&started_path, WATCHDOG_POLL_ERROR_PARTIAL_MARKER)
+        .expect("write partial watchdog poll-error child start marker");
+
+    let mut stdin = io::stdin().lock();
+    let mut complete_marker = [0_u8; 1];
+    stdin
+        .read_exact(&mut complete_marker)
+        .expect("wait for watchdog poll-error marker completion signal");
+    fs::write(&started_path, WATCHDOG_POLL_ERROR_STARTED_MARKER)
+        .expect("complete watchdog poll-error child start marker");
+
+    let mut buffer = [0_u8; 1];
+    loop {
+        match stdin.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(error) => panic!("read watchdog poll-error child stdin: {error}"),
+        }
+    }
+}
+
+#[test]
+fn child_watchdog_reaps_running_child_before_reporting_poll_error() {
+    let marker_dir = tempfile::tempdir().expect("create watchdog poll-error marker directory");
+    let started_path = marker_dir.path().join("child-started");
+    let mut child = Command::new(env::current_exe().expect("locate current test executable"))
+        .args([
+            "--exact",
+            "child_watchdog_poll_error_subprocess_entry",
+            "--nocapture",
+        ])
+        .env(WATCHDOG_POLL_ERROR_CHILD_ENV, "1")
+        .env(WATCHDOG_POLL_ERROR_STARTED_PATH_ENV, &started_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn watchdog poll-error child process");
+    let mut child_stdin = child
+        .stdin
+        .take()
+        .expect("open watchdog poll-error child stdin");
+    let injections = Arc::new(AtomicUsize::new(0));
+    let poll_injections = Arc::clone(&injections);
+    let marker_completions = Arc::new(AtomicUsize::new(0));
+    let poll_marker_completions = Arc::clone(&marker_completions);
+    let poll_started_path = started_path.clone();
+
+    let watchdog = wait_for_child_with_watchdog(child, Duration::from_secs(15), move |child| {
+        if fs::read_to_string(&poll_started_path)
+            .is_ok_and(|marker| marker == WATCHDOG_POLL_ERROR_STARTED_MARKER)
+            && poll_injections.load(Ordering::SeqCst) == 0
+        {
+            let status = child.try_wait()?;
+            assert!(
+                status.is_none(),
+                "watchdog poll-error child exited before error injection: {status:?}"
+            );
+            poll_injections.fetch_add(1, Ordering::SeqCst);
+            return Err(io::Error::other(INJECTED_POLL_ERROR));
+        }
+        if fs::read_to_string(&poll_started_path)
+            .is_ok_and(|marker| marker == WATCHDOG_POLL_ERROR_PARTIAL_MARKER)
+            && poll_marker_completions.load(Ordering::SeqCst) == 0
+        {
+            child_stdin.write_all(b"1")?;
+            child_stdin.flush()?;
+            poll_marker_completions.fetch_add(1, Ordering::SeqCst);
+        }
+        child.try_wait()
+    })
+    .expect("watchdog must reap the child before returning the poll error");
+
+    assert_eq!(injections.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        marker_completions.load(Ordering::SeqCst),
+        1,
+        "the watchdog must not inject a poll error before the marker is complete"
+    );
+    assert!(!watchdog.timed_out, "{watchdog:?}");
+    assert_eq!(watchdog.poll_error.as_deref(), Some(INJECTED_POLL_ERROR));
+    assert!(watchdog.kill_error.is_none(), "{watchdog:?}");
+    assert!(
+        !watchdog.output.status.success(),
+        "poll-error child was not terminated: {watchdog:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&started_path).expect("read watchdog child start marker"),
+        WATCHDOG_POLL_ERROR_STARTED_MARKER
+    );
 }
 
 #[test]
@@ -1053,6 +1453,316 @@ fn concurrent_multi_cf_flush_keeps_collector_properties_isolated() {
     assert_eq!(ids, [0, 1, 2]);
     assert_eq!(counts.collectors_created.load(Ordering::SeqCst), 3);
     assert_eq!(counts.collectors_dropped.load(Ordering::SeqCst), 3);
+}
+
+fn run_factory_create_overlap_scenario(db_path: &Path) {
+    const COMPACT_CF: &str = "compact_cf";
+    const FLUSH_CF: &str = "flush_cf";
+    const GATE_TIMEOUT: Duration = Duration::from_secs(15);
+    const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+    let counts = Arc::new(LifecycleCounts::default());
+    let gate = Arc::new(OverlapGate::default());
+    let events = Arc::new(OverlapEvents::default());
+    let mut env = Env::new().expect("create isolated RocksDB environment");
+    env.set_high_priority_background_threads(2);
+    env.set_low_priority_background_threads(2);
+
+    let mut options = Options::default();
+    options.create_if_missing(true);
+    options.create_missing_column_families(true);
+    options.set_env(&env);
+    options.set_max_background_jobs(4);
+    options.set_max_subcompactions(1);
+    options.set_num_levels(2);
+    options.set_disable_auto_compactions(true);
+    options.set_level_zero_file_num_compaction_trigger(1000);
+    options.set_target_file_size_base(64 * 1024 * 1024);
+    options.add_event_listener(OverlapEventListener {
+        events: Arc::clone(&events),
+    });
+    options.set_table_properties_collector_factory(OverlapFactory {
+        counts: Arc::clone(&counts),
+        gate: Arc::clone(&gate),
+        gate_timeout: GATE_TIMEOUT,
+    });
+    let descriptors = ["default", COMPACT_CF, FLUSH_CF]
+        .map(|name| ColumnFamilyDescriptor::new(name, options.clone()));
+    let db = Arc::new(
+        DB::open_cf_descriptors(&options, db_path, descriptors)
+            .expect("open flush-compaction overlap database"),
+    );
+    drop(options);
+
+    let compact_value = vec![b'c'; 1024];
+    for round in 0..3 {
+        let compact_cf = db
+            .cf_handle(COMPACT_CF)
+            .expect("get compact column family handle");
+        for key_index in 0..128 {
+            let key = format!("overlap-key-{key_index:04}");
+            let mut value = compact_value.clone();
+            value.extend_from_slice(format!("-{round}").as_bytes());
+            db.put_cf(&compact_cf, key.as_bytes(), value)
+                .expect("write overlapping compaction input");
+        }
+        let mut flush_options = FlushOptions::default();
+        flush_options.set_wait(true);
+        db.flush_cf_opt(&compact_cf, &flush_options)
+            .expect("flush compaction input SST");
+    }
+
+    assert_eq!(num_files_at_level_cf(&db, COMPACT_CF, 0), 3);
+    assert_eq!(collector_ids_from_named_cf(&db, COMPACT_CF).len(), 3);
+    assert_eq!(num_active_memtable_entries_cf(&db, COMPACT_CF), 0);
+    assert_eq!(num_files_at_level_cf(&db, FLUSH_CF, 0), 0);
+    assert!(collector_ids_from_named_cf(&db, FLUSH_CF).is_empty());
+
+    {
+        let flush_cf = db
+            .cf_handle(FLUSH_CF)
+            .expect("get flush column family handle");
+        for key_index in 0..128 {
+            let key = format!("flush-key-{key_index:04}");
+            db.put_cf(&flush_cf, key.as_bytes(), b"pending-manual-flush")
+                .expect("write pending flush memtable");
+        }
+    }
+    assert_eq!(num_active_memtable_entries_cf(&db, FLUSH_CF), 128);
+
+    events
+        .flushes
+        .lock()
+        .expect("flush event lock poisoned")
+        .clear();
+    events
+        .compactions
+        .lock()
+        .expect("compaction event lock poisoned")
+        .clear();
+    gate.arm();
+
+    let (completion_tx, completion_rx) = mpsc::channel();
+    let compact_db = Arc::clone(&db);
+    let compact_tx = completion_tx.clone();
+    let compact_thread = thread::spawn(move || {
+        let compact_cf = compact_db
+            .cf_handle(COMPACT_CF)
+            .expect("get compact column family handle in worker");
+        let mut compact_options = CompactOptions::default();
+        compact_options.set_target_level(1);
+        compact_options.set_change_level(true);
+        compact_options.set_exclusive_manual_compaction(false);
+        compact_options.set_bottommost_level_compaction(BottommostLevelCompaction::Skip);
+        compact_db.compact_range_cf_opt::<&[u8], &[u8]>(&compact_cf, None, None, &compact_options);
+        compact_tx
+            .send(("manual compaction", Ok(())))
+            .expect("report manual compaction completion");
+    });
+
+    let flush_db = Arc::clone(&db);
+    let flush_tx = completion_tx;
+    let flush_thread = thread::spawn(move || {
+        let flush_cf = flush_db
+            .cf_handle(FLUSH_CF)
+            .expect("get flush column family handle in worker");
+        let mut flush_options = FlushOptions::default();
+        flush_options.set_wait(true);
+        let result = flush_db.flush_cf_opt(&flush_cf, &flush_options);
+        flush_tx
+            .send(("manual flush", result.map_err(|error| error.to_string())))
+            .expect("report manual flush completion");
+    });
+
+    let operation_deadline = Instant::now() + OPERATION_TIMEOUT;
+    let mut completions = Vec::new();
+    while completions.len() < 2 {
+        let remaining = operation_deadline.saturating_duration_since(Instant::now());
+        match completion_rx.recv_timeout(remaining) {
+            Ok(completion) => completions.push(completion),
+            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let timed_out_before_release = completions.len() != 2;
+    let timeout_snapshot = timed_out_before_release.then(|| gate.snapshot());
+    if timed_out_before_release {
+        gate.force_release();
+        let release_deadline = Instant::now() + OPERATION_TIMEOUT;
+        while completions.len() < 2 {
+            let remaining = release_deadline.saturating_duration_since(Instant::now());
+            match completion_rx.recv_timeout(remaining) {
+                Ok(completion) => completions.push(completion),
+                Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
+                    break;
+                }
+            }
+        }
+    }
+
+    if completions.len() == 2 {
+        compact_thread
+            .join()
+            .expect("manual compaction worker must not panic");
+        flush_thread
+            .join()
+            .expect("manual flush worker must not panic");
+    }
+    assert_eq!(
+        completions.len(),
+        2,
+        "operations did not finish after forcing gate release; before_release={timeout_snapshot:?}; after_release={:?}",
+        gate.snapshot()
+    );
+    assert!(
+        !timed_out_before_release,
+        "operations exceeded their deadline; before_release={timeout_snapshot:?}; after_release={:?}",
+        gate.snapshot()
+    );
+    for (operation, result) in completions {
+        result.unwrap_or_else(|error| panic!("{operation} failed: {error}"));
+    }
+
+    let gate_snapshot = gate.snapshot();
+    assert!(
+        gate_snapshot.max_in_flight >= 2,
+        "flush and compaction collector creation did not overlap: {gate_snapshot:?}"
+    );
+    assert!(!gate_snapshot.timed_out, "{gate_snapshot:?}");
+    assert_eq!(gate_snapshot.in_flight, 0, "{gate_snapshot:?}");
+
+    let flush_create = gate_snapshot
+        .flush
+        .expect("record flush collector creation");
+    let compaction_create = gate_snapshot
+        .compaction
+        .expect("record compaction collector creation");
+    assert_eq!(flush_create.context.level_at_creation, 0);
+    assert_eq!(compaction_create.context.level_at_creation, 1);
+    assert_ne!(
+        flush_create.context.column_family_id,
+        compaction_create.context.column_family_id
+    );
+    assert_ne!(flush_create.collector_id, compaction_create.collector_id);
+
+    assert_eq!(num_files_at_level_cf(&db, COMPACT_CF, 0), 0);
+    assert!(num_files_at_level_cf(&db, COMPACT_CF, 1) >= 1);
+    assert_eq!(num_files_at_level_cf(&db, FLUSH_CF, 0), 1);
+    assert_eq!(
+        collector_ids_from_named_cf(&db, COMPACT_CF),
+        vec![compaction_create.collector_id]
+    );
+    assert_eq!(
+        collector_ids_from_named_cf(&db, FLUSH_CF),
+        vec![flush_create.collector_id]
+    );
+
+    let flush_events = events
+        .flushes
+        .lock()
+        .expect("flush event lock poisoned")
+        .clone();
+    assert!(flush_events.iter().any(|event| {
+        event.cf_name.as_deref() == Some(FLUSH_CF.as_bytes())
+            && event.reason == DBFlushReason::KManualFlush
+    }));
+    let compaction_events = events
+        .compactions
+        .lock()
+        .expect("compaction event lock poisoned")
+        .clone();
+    assert!(compaction_events.iter().any(|event| {
+        event.cf_name.as_deref() == Some(COMPACT_CF.as_bytes())
+            && event.reason == DBCompactionReason::KManualCompaction
+            && event.status_ok
+            && event.base_input_level == 0
+            && event.output_level == 1
+            && event.input_file_count >= 2
+            && event.output_file_count >= 1
+    }));
+
+    assert_eq!(
+        counts.collectors_created.load(Ordering::SeqCst),
+        counts.collectors_dropped.load(Ordering::SeqCst)
+    );
+    assert_eq!(counts.factories_dropped.load(Ordering::SeqCst), 0);
+    drop(db);
+    assert_eq!(counts.factories_dropped.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn factory_create_overlap_subprocess_entry() {
+    if env::var_os(OVERLAP_CHILD_ENV).is_none() {
+        return;
+    }
+    let db_path =
+        env::var_os(OVERLAP_CHILD_DB_ENV).expect("overlap child database path must be provided");
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{OVERLAP_CHILD_STARTED_MARKER}").expect("write overlap child start marker");
+    stdout.flush().expect("flush overlap child start marker");
+    drop(stdout);
+
+    run_factory_create_overlap_scenario(Path::new(&db_path));
+
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{OVERLAP_CHILD_SUCCEEDED_MARKER}")
+        .expect("write overlap child success marker");
+    stdout.flush().expect("flush overlap child success marker");
+}
+
+#[test]
+fn factory_create_overlaps_between_real_flush_and_manual_compaction() {
+    if skip_bundled_backend_only_test() {
+        return;
+    }
+
+    let path = DBPath::new("_rust_rocksdb_collector_flush_compaction_overlap");
+    let timeout = Duration::from_secs(75);
+    let path_ref = &path;
+    let db_path: &Path = path_ref.as_ref();
+    let child = Command::new(env::current_exe().expect("locate current test executable"))
+        .args([
+            "--exact",
+            "factory_create_overlap_subprocess_entry",
+            "--nocapture",
+        ])
+        .env(OVERLAP_CHILD_ENV, "1")
+        .env(OVERLAP_CHILD_DB_ENV, db_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn collector overlap child process");
+    let watchdog = wait_for_child_with_watchdog(child, timeout, Child::try_wait)
+        .expect("wait for collector overlap child process");
+    let output = &watchdog.output;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !watchdog.timed_out,
+        "collector overlap child exceeded {timeout:?}; kill_error={:?}; stdout={stdout}; stderr={stderr}",
+        watchdog.kill_error
+    );
+    assert!(
+        watchdog.poll_error.is_none(),
+        "poll collector overlap child process: {:?}; kill_error={:?}; stdout={stdout}; stderr={stderr}",
+        watchdog.poll_error,
+        watchdog.kill_error
+    );
+    assert!(
+        output.status.success(),
+        "collector overlap child failed with {}; stdout={stdout}; stderr={stderr}",
+        output.status
+    );
+    assert!(
+        stdout.contains(OVERLAP_CHILD_STARTED_MARKER),
+        "collector overlap child did not emit its start marker; stdout={stdout}; stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(OVERLAP_CHILD_SUCCEEDED_MARKER),
+        "collector overlap child did not emit its success marker; stdout={stdout}; stderr={stderr}"
+    );
 }
 
 #[test]
