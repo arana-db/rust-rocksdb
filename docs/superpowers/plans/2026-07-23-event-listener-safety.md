@@ -16,20 +16,20 @@
 - 修改：`src/db_options.rs:1788-1791`
 - 修改：`src/event_listener.rs:508-525,618-637,639-798`
 
-- [ ] **步骤 1：添加非 `'static` listener 的 compile-fail 文档测试**
+- [x] **步骤 1：添加非 `'static` listener 的 compile-fail 文档测试**
 
 在 `Options::add_event_listener` 文档中加入可独立编译的 `compile_fail,E0597`
 示例。示例定义借用局部 `AtomicUsize` 的 listener，并调用
 `options.add_event_listener(listener)`；当前实现会错误编译成功，因此 doctest 应
 红灯。
 
-- [ ] **步骤 2：添加 `MutableStatus` 逃逸的 compile-fail 文档测试**
+- [x] **步骤 2：添加 `MutableStatus` 逃逸的 compile-fail 文档测试**
 
 在 `EventListener::on_background_error` 合同附近增加示例，尝试把 callback 收到的
 status 引用保存到更长生命周期的位置。当前按值参数会让示例编译成功；接口改为
 借用后必须编译失败。
 
-- [ ] **步骤 3：运行 doctest 验证预期红灯**
+- [x] **步骤 3：运行 doctest 验证预期红灯**
 
 运行：
 
@@ -40,7 +40,7 @@ CARGO_TARGET_DIR=/tmp/rust-rocksdb-event-listener-target cargo test --doc
 预期：新增的 `compile_fail` 示例至少有一个报告“Test compiled successfully, but
 it's marked compile_fail”。其他 doctest 不能失败。
 
-- [ ] **步骤 4：写入最小生命周期修复**
+- [x] **步骤 4：写入最小生命周期修复**
 
 将注册入口和内部构造器约束为：
 
@@ -65,7 +65,7 @@ fn on_background_error(&self, _: DBBackgroundErrorReason, _: &MutableStatus) {}
 trampoline 构造局部 `MutableStatus` 后以 `&status` 调用用户实现。不得改变
 `MutableStatus::reset/result/severity` 行为。
 
-- [ ] **步骤 5：验证生命周期绿灯**
+- [x] **步骤 5：验证生命周期绿灯**
 
 运行：
 
@@ -76,7 +76,7 @@ CARGO_TARGET_DIR=/tmp/rust-rocksdb-event-listener-target cargo test --test test_
 
 预期：compile-fail 示例和现有 5 个 EventListener 集成测试全部通过。
 
-- [ ] **步骤 6：提交生命周期合同**
+- [x] **步骤 6：提交生命周期合同**
 
 ```bash
 git add src/db_options.rs src/event_listener.rs
@@ -91,19 +91,19 @@ git commit -m "fix(event-listener): enforce callback lifetimes"
 - 修改测试：`src/event_listener.rs` 内部测试模块
 - 修改测试：`tests/test_event_listener.rs`
 
-- [ ] **步骤 1：编写未注册 handle 析构测试**
+- [x] **步骤 1：编写未注册 handle 析构测试**
 
 在 `src/event_listener.rs` 的 `#[cfg(test)]` 模块定义带 `Arc<AtomicUsize>` 的
 listener，直接调用 crate-private constructor 后 drop handle，断言 listener
 析构计数为 `1`。当前 `DBEventListener` 没有 `Drop`，测试应失败为 `0`。
 
-- [ ] **步骤 2：编写 Options 到 DB 的所有权转移测试**
+- [x] **步骤 2：编写 Options 到 DB 的所有权转移测试**
 
 在 `tests/test_event_listener.rs` 增加真实 DB 测试：注册 listener、打开 DB、drop
 Options、执行 put/flush，确认 callback 仍触发；drop DB 后 listener 析构计数恰好
 为 `1`。
 
-- [ ] **步骤 3：运行定向测试验证红灯**
+- [x] **步骤 3：运行定向测试验证红灯**
 
 ```bash
 CARGO_TARGET_DIR=/tmp/rust-rocksdb-event-listener-target cargo test event_listener_handle -- --nocapture
@@ -112,7 +112,7 @@ CARGO_TARGET_DIR=/tmp/rust-rocksdb-event-listener-target cargo test --test test_
 
 预期：未注册 handle 的 Drop 计数失败；不得接受数据库打开失败作为红灯。
 
-- [ ] **步骤 4：实现内部 RAII handle**
+- [x] **步骤 4：实现内部 RAII handle**
 
 创建 crate-private handle：
 
@@ -132,12 +132,12 @@ pub(crate) struct EventListenerHandle {
 - 不实现 `Send` 或 `Sync`。
 - `Options::add_event_listener` 只把 `handle.into_raw()` 交给 C++。
 
-- [ ] **步骤 5：验证 ownership 绿灯**
+- [x] **步骤 5：验证 ownership 绿灯**
 
 运行任务 2 的两个定向命令，并执行完整 EventListener 测试。预期未注册、已注册和
 DB 最终销毁三条路径都只析构一次。
 
-- [ ] **步骤 6：提交 ownership 修复**
+- [x] **步骤 6：提交 ownership 修复**
 
 ```bash
 git add src/event_listener.rs src/db_options.rs tests/test_event_listener.rs
@@ -150,7 +150,7 @@ git commit -m "fix(event-listener): manage native listener ownership"
 - 修改：`src/event_listener.rs:639-767`
 - 修改测试：`tests/test_event_listener.rs`
 
-- [ ] **步骤 1：编写 flush callback panic 子进程测试**
+- [x] **步骤 1：编写 flush callback panic 子进程测试**
 
 参照 `tests/test_table_properties_collector_factory.rs` 的 child-process 模式，定义
 固定入口标记和模式环境变量。子进程注册一个在 `on_flush_begin` panic 的 listener
@@ -160,7 +160,7 @@ git commit -m "fix(event-listener): manage native listener ownership"
 rust-rocksdb: event listener on_flush_begin callback panicked
 ```
 
-- [ ] **步骤 2：编写 destructor panic 子进程测试**
+- [x] **步骤 2：编写 destructor panic 子进程测试**
 
 子进程注册一个 `Drop` 会 panic 的 listener，打开并销毁 DB；父进程断言 stderr
 包含：
@@ -169,7 +169,7 @@ rust-rocksdb: event listener on_flush_begin callback panicked
 rust-rocksdb: event listener destructor callback panicked
 ```
 
-- [ ] **步骤 3：运行子进程测试验证红灯**
+- [x] **步骤 3：运行子进程测试验证红灯**
 
 ```bash
 CARGO_TARGET_DIR=/tmp/rust-rocksdb-event-listener-target cargo test --test test_event_listener event_listener_panic -- --nocapture
@@ -177,7 +177,7 @@ CARGO_TARGET_DIR=/tmp/rust-rocksdb-event-listener-target cargo test --test test_
 
 预期：当前实现没有固定诊断，因此父测试失败。子进程能到达标记入口。
 
-- [ ] **步骤 4：实现统一 fail-fast helper**
+- [x] **步骤 4：实现统一 fail-fast helper**
 
 在 `src/event_listener.rs` 增加：
 
@@ -193,7 +193,7 @@ fn abort_on_panic(callback: &str, f: impl FnOnce()) {
 所有 EventListener trampolines 和 destructor 都必须通过该 helper 调用用户代码。
 unsafe 解引用放在最小作用域，并添加对应 `SAFETY` 注释。不得只包装 flush 路径。
 
-- [ ] **步骤 5：验证 panic 绿灯和行为回归**
+- [x] **步骤 5：验证 panic 绿灯和行为回归**
 
 运行：
 
@@ -204,7 +204,7 @@ CARGO_TARGET_DIR=/tmp/rust-rocksdb-event-listener-target cargo test --test test_
 
 预期：两个子进程合同和全部真实 EventListener 测试通过。
 
-- [ ] **步骤 6：提交 panic 边界**
+- [x] **步骤 6：提交 panic 边界**
 
 ```bash
 git add src/event_listener.rs tests/test_event_listener.rs
@@ -217,7 +217,7 @@ git commit -m "fix(event-listener): fail fast on callback panics"
 - 修改：`docs/kiwi-maintenance-baseline.md`
 - 修改：`CHANGELOG.md`
 
-- [ ] **步骤 1：更新同步状态字段**
+- [x] **步骤 1：更新同步状态字段**
 
 在维护文档写明：
 
@@ -230,7 +230,7 @@ Maintenance branch: master
 
 保留 rust-rocksdb、sys、RocksDB 和 Snappy 版本/SHA。
 
-- [ ] **步骤 2：加入可复制的未来同步流程**
+- [x] **步骤 2：加入可复制的未来同步流程**
 
 文档包含：
 
@@ -244,12 +244,12 @@ git rev-list --left-right --count <last-synced-sha>...master
 真正门禁是 upstream-only 必须为 `0`。实际同步前重新获取
 `actual-upstream/master`，更新 commit、submodule 和版本记录。
 
-- [ ] **步骤 3：修正文档中的维护分支语义**
+- [x] **步骤 3：修正文档中的维护分支语义**
 
 把“`kiwi-maintenance` 是 base branch”改为当前真实的 `master` Arana 维护线；保留
 `actual-upstream` push URL 必须为 `DISABLED` 的规则。
 
-- [ ] **步骤 4：更新 Changelog**
+- [x] **步骤 4：更新 Changelog**
 
 在当前版本段记录：
 
@@ -258,7 +258,7 @@ git rev-list --left-right --count <last-synced-sha>...master
 - callback/destructor panic 使用固定诊断并 fail-fast。
 - native listener constructor ownership 不再泄漏。
 
-- [ ] **步骤 5：验证文档并提交**
+- [x] **步骤 5：验证文档并提交**
 
 ```bash
 rg -n 'a27cb5bdbdb74550835ed5820ad02817c9a8c457|Last synchronized|actual-upstream|upstream-only|Arana-only' docs/kiwi-maintenance-baseline.md
@@ -272,7 +272,7 @@ git commit -m "docs: record rust-rocksdb upstream sync point"
 **文件：**
 - 不新增生产文件
 
-- [ ] **步骤 1：格式与文档**
+- [x] **步骤 1：格式与文档**
 
 ```bash
 cargo fmt --all -- --check
@@ -281,25 +281,29 @@ cargo rustdoc -- -D warnings
 git diff --check origin/master..HEAD
 ```
 
-- [ ] **步骤 2：定向和 feature 测试**
+- [x] **步骤 2：定向和 feature 测试**
 
 ```bash
 CARGO_TARGET_DIR=/tmp/rust-rocksdb-event-listener-target cargo test --test test_event_listener -- --nocapture
 CARGO_TARGET_DIR=/tmp/rust-rocksdb-event-listener-target cargo test --test test_event_listener --features multi-threaded-cf -- --nocapture
 ```
 
-- [ ] **步骤 3：Lint 与默认测试**
+- [x] **步骤 3：Lint 与默认测试**
 
 按 `.github/workflows/rust.yml` 的实际命令运行 Clippy 和默认测试；不得机械使用
 `--all-features`，因为 `coroutines` 依赖 Folly/liburing。
 
-- [ ] **步骤 4：system RocksDB 验证**
+- [x] **步骤 4：system RocksDB 验证**
 
 若本机存在 PR #8 缓存的 pinned system RocksDB 11.1.2，则使用相同
 `ROCKSDB_LIB_DIR`、`ROCKSDB_INCLUDE_DIR` 和动态链接设置运行 EventListener 测试；
 否则记录环境缺口，并以 GitHub `Linux (system RocksDB)` 为最终远端门禁。
 
-- [ ] **步骤 5：规格与代码质量双重审查**
+执行记录（2026-07-23）：本机及 review worktree 中未找到
+`target/system-rocksdb/librocksdb.so`，因此未伪造或临时重建该缓存；system backend
+留给 PR 的 GitHub `Linux (system RocksDB)` job 验证。
+
+- [x] **步骤 5：规格与代码质量双重审查**
 
 逐项核对设计目标、API 兼容、unsafe 依据、panic 策略、测试变异强度、同步文档和
 无关 Diff。P0/P1 未清零前不得 push。
