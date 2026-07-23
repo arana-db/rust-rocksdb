@@ -4,7 +4,7 @@
 
 **目标：** 在当前 Arana 维护线上修复 EventListener 的生命周期、native ownership 和 panic 边界，并记录最后同步的 `zaidoon1/rust-rocksdb` commit。
 
-**架构：** 保留现有完整 EventListener 事件集合和 C++ extension，只收紧 Rust 安全接口。注册入口要求 `'static`，callback-only status 改为借用，内部 handle 通过 RAII 管理转移前所有权，所有用户回调和析构使用统一 fail-fast panic helper。
+**架构：** 保留现有完整 EventListener 事件集合和 C++ extension，只收紧 Rust 安全接口。注册入口要求 `'static`，callback-only status 改为借用，公开但字段不透明的低层 handle 通过 RAII 管理转移前所有权，所有用户回调和析构使用统一 fail-fast panic helper。
 
 **技术栈：** Rust 1.91、C/C++ FFI、RocksDB 11.1.2、rustdoc compile-fail、WSL/Linux、Cargo integration tests。
 
@@ -23,11 +23,13 @@
 `options.add_event_listener(listener)`；当前实现会错误编译成功，因此 doctest 应
 红灯。
 
-- [x] **步骤 2：添加 `MutableStatus` 逃逸的 compile-fail 文档测试**
+- [x] **步骤 2：添加精确签名和 `MutableStatus` 逃逸文档测试**
 
-在 `EventListener::on_background_error` 合同附近增加示例，尝试把 callback 收到的
-status 引用保存到更长生命周期的位置。当前按值参数会让示例编译成功；接口改为
-借用后必须编译失败。
+先用正向 doctest 按精确签名实现
+`on_background_error(..., status: &MutableStatus)`，锁定公开 trait 的参数类型；再
+增加 `compile_fail,E0521` 示例，尝试把真实 callback 参数保存到 `'static` 位置，
+验证引用不能逃逸 callback 生命周期。旧按值签名由前一个正向测试识别；不能声称
+它会让同一个 E0521 逃逸示例编译成功。
 
 - [x] **步骤 3：运行 doctest 验证预期红灯**
 
@@ -37,8 +39,9 @@ status 引用保存到更长生命周期的位置。当前按值参数会让示�
 CARGO_TARGET_DIR=/tmp/rust-rocksdb-event-listener-target cargo test --doc
 ```
 
-预期：新增的 `compile_fail` 示例至少有一个报告“Test compiled successfully, but
-it's marked compile_fail”。其他 doctest 不能失败。
+预期：在旧按值 API 上，正向精确签名 doctest 因 trait 方法参数类型不匹配而失败；
+接口改为借用后，正向示例通过，逃逸示例以 E0521 编译失败并被 rustdoc 视为通过。
+其他 doctest 不能失败。
 
 - [x] **步骤 4：写入最小生命周期修复**
 
@@ -51,7 +54,7 @@ where
 ```
 
 ```rust
-pub(crate) fn new_event_listener<E>(listener: E) -> EventListenerHandle
+pub fn new_event_listener<E>(listener: E) -> DBEventListener
 where
     E: EventListener + 'static,
 ```
@@ -94,7 +97,7 @@ git commit -m "fix(event-listener): enforce callback lifetimes"
 - [x] **步骤 1：编写未注册 handle 析构测试**
 
 在 `src/event_listener.rs` 的 `#[cfg(test)]` 模块定义带 `Arc<AtomicUsize>` 的
-listener，直接调用 crate-private constructor 后 drop handle，断言 listener
+listener，直接调用公开的低层 constructor 后 drop handle，断言 listener
 析构计数为 `1`。当前 `DBEventListener` 没有 `Drop`，测试应失败为 `0`。
 
 - [x] **步骤 2：编写 Options 到 DB 的所有权转移测试**
@@ -112,12 +115,12 @@ CARGO_TARGET_DIR=/tmp/rust-rocksdb-event-listener-target cargo test --test test_
 
 预期：未注册 handle 的 Drop 计数失败；不得接受数据库打开失败作为红灯。
 
-- [x] **步骤 4：实现内部 RAII handle**
+- [x] **步骤 4：实现公开低层 RAII handle**
 
-创建 crate-private handle：
+保留公开但字段不透明的低层 handle：
 
 ```rust
-pub(crate) struct EventListenerHandle {
+pub struct DBEventListener {
     inner: *mut ffi::rust_rocksdb_eventlistener_t,
     owned: bool,
 }
@@ -131,6 +134,8 @@ pub(crate) struct EventListenerHandle {
   `rust_rocksdb_eventlistener_destroy`。
 - 不实现 `Send` 或 `Sync`。
 - `Options::add_event_listener` 只把 `handle.into_raw()` 交给 C++。
+- `DBEventListener` 和 `new_event_listener` 保持 public symbol，避免删除既有低层
+  API；RAII 只修复 ownership，不收窄可见性。
 
 - [x] **步骤 5：验证 ownership 绿灯**
 
@@ -251,12 +256,15 @@ git rev-list --left-right --count <last-synced-sha>...master
 
 - [x] **步骤 4：更新 Changelog**
 
-在当前版本段记录：
+在顶部 `Unreleased` 段记录 breaking change；`0.51.0` 已在 `db45d89` 发布，
+不得回写：
 
+- `on_background_error` 从 `status: MutableStatus` 改为
+  `status: &MutableStatus`，下游 trait impl 必须修改签名。
 - EventListener registration requires `'static`。
-- background status 只在 callback 内借用。
 - callback/destructor panic 使用固定诊断并 fail-fast。
-- native listener constructor ownership 不再泄漏。
+- public `DBEventListener`/`new_event_listener` 保持兼容，native listener
+  constructor ownership 不再泄漏。
 
 - [x] **步骤 5：验证文档并提交**
 
@@ -266,6 +274,15 @@ git diff --check
 git add docs/kiwi-maintenance-baseline.md CHANGELOG.md
 git commit -m "docs: record rust-rocksdb upstream sync point"
 ```
+
+Review correction 执行记录（2026-07-23）：
+
+- 确认 `on_background_error` 的按值到借用变更是公开 breaking change，并把记录从
+  已发布的 `0.51.0` 移到 `Unreleased`。
+- 将 `MutableStatus` 门禁纠正为“正向精确签名 doctest + E0521 逃逸
+  compile-fail”，删除“旧按值会让同一个逃逸示例编译成功”的错误完成记录。
+- 保留公开的 `DBEventListener` 和 `new_event_listener`；RAII 仅管理转移前所有权，
+  不通过降低可见性制造额外兼容性破坏。
 
 ### 任务 5：最终质量门禁和交付
 

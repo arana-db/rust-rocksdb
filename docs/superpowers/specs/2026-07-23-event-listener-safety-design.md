@@ -30,9 +30,10 @@ flush 回调，其余回调是空 stub，且基于已经废弃的历史维护线
 
 ## 生命周期合同
 
-`Options::add_event_listener` 和内部构造函数都要求 `L: EventListener + 'static`。
-listener 会被 `Box` 固定地址并交给 C++ `shared_ptr<EventListener>`，因此它不能
-借用调用栈上的临时数据。使用 `Arc` 等拥有型共享状态的 listener 仍然兼容。
+`Options::add_event_listener` 和公开的低层构造函数都要求其 listener 类型满足
+`EventListener + 'static`。listener 会被 `Box` 固定地址并交给 C++
+`shared_ptr<EventListener>`，因此它不能借用调用栈上的临时数据。使用 `Arc` 等
+拥有型共享状态的 listener 仍然兼容。
 
 `MutableStatus` 不再按值传给 `on_background_error`，改为 callback-scoped 的
 `&MutableStatus`。wrapper 仍可在 callback 内调用 `result()`、`severity()` 和
@@ -43,15 +44,23 @@ listener 会被 `Box` 固定地址并交给 C++ `shared_ptr<EventListener>`，�
 
 ## 所有权模型
 
-内部 `EventListenerHandle` 唯一拥有
-`rust_rocksdb_eventlistener_t*`：
+公开但字段不透明的 `DBEventListener` 唯一拥有
+`rust_rocksdb_eventlistener_t*`。为保留现有低层 API 兼容性，构造器保持：
+
+```rust
+pub fn new_event_listener<E>(listener: E) -> DBEventListener
+where
+    E: EventListener + 'static,
+```
+
+所有权规则如下：
 
 - 构造成功后，未注册的 handle 在 `Drop` 中调用 native destroy。
 - `Options::add_event_listener` 通过 `into_raw()` 把所有权转移给 RocksDB。
 - 转移后 Rust handle 不再析构该指针；C++ `shared_ptr` 在最后一个 owner 销毁时
   调用 native listener 析构，并最终释放 `Box<L>`。
-- 底层构造器和 handle 仅为 `pub(crate)`，公开入口保持
-  `Options::add_event_listener`。
+- 底层 `DBEventListener` 和 `new_event_listener` 保持公开；handle 字段仍然私有，
+  不扩大可直接操作 raw pointer 的接口。
 - 不为 handle 添加没有证明需要的 `unsafe impl Send/Sync`。
 
 ## Panic 策略
@@ -71,10 +80,16 @@ listener 会被 `Box` 固定地址并交给 C++ `shared_ptr<EventListener>`，�
 
 ### 编译期合同
 
-使用仓库已有的 rustdoc `compile_fail` 模式验证：
+使用两类互补的 rustdoc 门禁验证：
 
 - 借用局部变量的 listener 不能传给 `Options::add_event_listener`。
-- `&MutableStatus` 不能保存到 callback 生命周期之外。
+- 正向 doctest 用精确函数签名实现
+  `on_background_error(..., status: &MutableStatus)`，直接锁定公开 trait 签名。
+- `compile_fail,E0521` 示例尝试把真实 callback 参数 `&MutableStatus` 保存到
+  `'static` 位置，证明它不能逃逸 callback 生命周期。
+
+精确签名 doctest 负责识别旧的按值 API；E0521 示例负责验证改为借用后的逃逸
+边界。不能把两者混为“旧按值实现会让同一个逃逸示例编译成功”。
 
 ### 所有权
 
