@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::*;
 
+use rust_rocksdb::event_listener::{DBEventListener, new_event_listener};
 use rust_rocksdb::{DB, FlushOptions, Options, event_listener::*};
 
 use util::DBPath;
@@ -147,6 +148,20 @@ impl Drop for OwnershipListener {
     fn drop(&mut self) {
         self.drops.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+#[test]
+fn test_public_event_listener_handle_drops_listener_once() {
+    let callbacks = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let handle: DBEventListener = new_event_listener(OwnershipListener {
+        callbacks,
+        drops: drops.clone(),
+    });
+
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    drop(handle);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
 struct FlushBeginPanickingListener;

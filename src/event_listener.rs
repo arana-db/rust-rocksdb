@@ -632,6 +632,21 @@ pub trait EventListener: Send + Sync {
     fn on_memtable_sealed(&self, _: &MemTableInfo) {}
     /// The mutable status is valid only while this callback is running.
     ///
+    /// The callback signature borrows the status from RocksDB:
+    ///
+    /// ```
+    /// use rust_rocksdb::event_listener::{
+    ///     DBBackgroundErrorReason, EventListener, MutableStatus,
+    /// };
+    ///
+    /// struct Listener;
+    /// impl EventListener for Listener {}
+    ///
+    /// let callback: fn(&Listener, DBBackgroundErrorReason, &MutableStatus) =
+    ///     <Listener as EventListener>::on_background_error;
+    /// let _ = callback;
+    /// ```
+    ///
     /// It cannot be moved into storage that outlives the callback:
     ///
     /// ```compile_fail,E0521
@@ -866,19 +881,20 @@ extern "C" fn on_error_recovery_end<E: EventListener>(
     });
 }
 
-pub(crate) struct EventListenerHandle {
+#[doc(hidden)]
+pub struct DBEventListener {
     inner: *mut ffi::rust_rocksdb_eventlistener_t,
     owned: bool,
 }
 
-impl EventListenerHandle {
+impl DBEventListener {
     pub(crate) fn into_raw(mut self) -> *mut ffi::rust_rocksdb_eventlistener_t {
         self.owned = false;
         self.inner
     }
 }
 
-impl Drop for EventListenerHandle {
+impl Drop for DBEventListener {
     fn drop(&mut self) {
         if self.owned && !self.inner.is_null() {
             // SAFETY: `inner` came from `rust_rocksdb_eventlistener_create`.
@@ -891,13 +907,14 @@ impl Drop for EventListenerHandle {
     }
 }
 
-pub(crate) fn new_event_listener<E>(e: E) -> EventListenerHandle
+#[doc(hidden)]
+pub fn new_event_listener<E>(e: E) -> DBEventListener
 where
     E: EventListener + 'static,
 {
     let p: Box<E> = Box::new(e);
     unsafe {
-        EventListenerHandle {
+        DBEventListener {
             // WARNING: none of the callbacks below are actually optional.
             // Rocksdb will try calling the callback as long as there is an
             // event listener setup, this means we must define all of them
