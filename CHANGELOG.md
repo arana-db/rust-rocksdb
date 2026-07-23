@@ -2,6 +2,11 @@
 
 ## 0.51.0 (2026-06-26)
 
+- fix: harden the `EventListener` FFI boundary. Listener registration now
+  requires `'static`, `MutableStatus` in background-error callbacks is borrowed
+  for the callback duration, every listener callback and destructor aborts with
+  a fixed diagnostic if user code panics, and the native listener handle is
+  released exactly once by RAII unless ownership is transferred to RocksDB.
 - fix(librocksdb-sys): upgrade the bundled RocksDB submodule to
   11.1.2. (zaidoon1)
 - feat: add `CompactOptions::set_blob_garbage_collection_age_cutoff`,
