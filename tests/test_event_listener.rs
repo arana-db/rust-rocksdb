@@ -1,11 +1,22 @@
 mod util;
 
-use rust_rocksdb::{DB, FlushOptions, Options, event_listener::*};
 use std::io::Write;
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::*;
+
+use rust_rocksdb::{DB, FlushOptions, Options, event_listener::*};
+
 use util::DBPath;
+
+const PANIC_CHILD_ENV: &str = "RUST_ROCKSDB_EVENT_LISTENER_PANIC_CHILD";
+const PANIC_CHILD_DB_ENV: &str = "RUST_ROCKSDB_EVENT_LISTENER_PANIC_DB";
+const PANIC_CHILD_MARKER: &str = "rust-rocksdb event-listener panic child entered";
+const FLUSH_BEGIN_PANIC_DIAGNOSTIC: &str =
+    "rust-rocksdb: event listener on_flush_begin callback panicked";
+const DESTRUCTOR_PANIC_DIAGNOSTIC: &str =
+    "rust-rocksdb: event listener destructor callback panicked";
 
 #[derive(Default, Clone)]
 struct EventCounter {
@@ -135,6 +146,117 @@ impl EventListener for OwnershipListener {
 impl Drop for OwnershipListener {
     fn drop(&mut self) {
         self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct FlushBeginPanickingListener;
+
+impl EventListener for FlushBeginPanickingListener {
+    fn on_flush_begin(&self, _: &FlushJobInfo) {
+        panic!("flush begin callback panic");
+    }
+}
+
+struct DestructorPanickingListener;
+
+impl EventListener for DestructorPanickingListener {}
+
+impl Drop for DestructorPanickingListener {
+    fn drop(&mut self) {
+        panic!("listener destructor panic");
+    }
+}
+
+fn run_panic_child(mode: &str, db_path: &Path) -> std::process::Output {
+    Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("event_listener_panic_child")
+        .arg("--nocapture")
+        .env(PANIC_CHILD_ENV, mode)
+        .env(PANIC_CHILD_DB_ENV, db_path)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn test_event_listener_flush_begin_panic_aborts_with_diagnostic() {
+    let path = DBPath::new("_rust_rocksdb_event_listener_flush_begin_panic");
+    let output = run_panic_child("flush_begin", (&path).as_ref());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "child unexpectedly succeeded; stdout={stdout}; stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(PANIC_CHILD_MARKER),
+        "child stdout did not confirm entry into the panic scenario; stdout={stdout}; stderr={stderr}"
+    );
+    assert!(
+        stderr.contains(FLUSH_BEGIN_PANIC_DIAGNOSTIC),
+        "child stderr did not contain the fail-fast diagnostic; stdout={stdout}; stderr={stderr}"
+    );
+}
+
+#[test]
+fn test_event_listener_destructor_panic_aborts_with_diagnostic() {
+    let path = DBPath::new("_rust_rocksdb_event_listener_destructor_panic");
+    let output = run_panic_child("destructor", (&path).as_ref());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "child unexpectedly succeeded; stdout={stdout}; stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(PANIC_CHILD_MARKER),
+        "child stdout did not confirm entry into the panic scenario; stdout={stdout}; stderr={stderr}"
+    );
+    assert!(
+        stderr.contains(DESTRUCTOR_PANIC_DIAGNOSTIC),
+        "child stderr did not contain the fail-fast diagnostic; stdout={stdout}; stderr={stderr}"
+    );
+}
+
+#[test]
+fn event_listener_panic_child() {
+    let mode = match std::env::var(PANIC_CHILD_ENV) {
+        Ok(mode) if mode == "flush_begin" || mode == "destructor" => mode,
+        _ => return,
+    };
+    let db_path = std::env::var_os(PANIC_CHILD_DB_ENV)
+        .expect("event listener panic child database path must be provided");
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{PANIC_CHILD_MARKER}").expect("write event listener panic child marker");
+    stdout
+        .flush()
+        .expect("flush event listener panic child marker");
+    drop(stdout);
+
+    match mode.as_str() {
+        "flush_begin" => {
+            let mut opts = Options::default();
+            opts.create_if_missing(true);
+            opts.add_event_listener(FlushBeginPanickingListener);
+            let db = DB::open(&opts, &db_path).unwrap();
+            db.put(b"key", b"value").unwrap();
+            let mut flush_opts = FlushOptions::default();
+            flush_opts.set_wait(true);
+            db.flush_opt(&flush_opts).unwrap();
+            panic!("flush begin callback did not abort the process");
+        }
+        "destructor" => {
+            let mut opts = Options::default();
+            opts.create_if_missing(true);
+            opts.add_event_listener(DestructorPanickingListener);
+            let db = DB::open(&opts, &db_path).unwrap();
+            drop(opts);
+            drop(db);
+            panic!("listener destructor did not abort the process");
+        }
+        _ => unreachable!(),
     }
 }
 

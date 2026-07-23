@@ -1,6 +1,11 @@
+use std::io::{self, Write};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::process;
+
+use libc::{c_char, c_void};
+
 use crate::ffi_util::convert_rocksdb_error;
 use crate::{Error, ffi};
-use libc::{c_char, c_void};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -663,91 +668,141 @@ pub trait EventListener: Send + Sync {
     fn on_error_recovery_end(&self, _: &BackgroundErrorRecoveryInfo) {}
 }
 
-extern "C" fn destructor<E: EventListener>(ctx: *mut c_void) {
-    unsafe {
-        drop(Box::from_raw(ctx as *mut E));
+fn abort_on_panic(callback: &str, f: impl FnOnce()) {
+    if catch_unwind(AssertUnwindSafe(f)).is_err() {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "rust-rocksdb: event listener {callback} callback panicked"
+        );
+        process::abort();
     }
+}
+
+extern "C" fn destructor<E: EventListener>(ctx: *mut c_void) {
+    abort_on_panic("destructor", || {
+        // SAFETY: `ctx` is the unique pointer produced by `Box::into_raw` in
+        // `new_event_listener`, and RocksDB calls this destructor exactly once.
+        unsafe {
+            drop(Box::from_raw(ctx.cast::<E>()));
+        }
+    });
 }
 
 unsafe extern "C" fn on_flush_begin<E: EventListener>(
     ctx: *mut c_void,
     info: *const ffi::rocksdb_flushjobinfo_t,
 ) {
-    let ctx = unsafe { &*(ctx as *mut E) };
-    let info = FlushJobInfo { inner: info };
-    ctx.on_flush_begin(&info);
+    abort_on_panic("on_flush_begin", || {
+        // SAFETY: RocksDB passes back the live `Box<E>` pointer registered by
+        // `new_event_listener`; callback execution does not outlive that listener.
+        let ctx = unsafe { &*ctx.cast::<E>() };
+        let info = FlushJobInfo { inner: info };
+        ctx.on_flush_begin(&info);
+    });
 }
 
 extern "C" fn on_flush_completed<E: EventListener>(
     ctx: *mut c_void,
     info: *const ffi::rocksdb_flushjobinfo_t,
 ) {
-    let ctx = unsafe { &*(ctx as *mut E) };
-    let info = FlushJobInfo { inner: info };
-    ctx.on_flush_completed(&info);
+    abort_on_panic("on_flush_completed", || {
+        // SAFETY: RocksDB passes back the live `Box<E>` pointer registered by
+        // `new_event_listener`; callback execution does not outlive that listener.
+        let ctx = unsafe { &*ctx.cast::<E>() };
+        let info = FlushJobInfo { inner: info };
+        ctx.on_flush_completed(&info);
+    });
 }
 
 extern "C" fn on_compaction_begin<E: EventListener>(
     ctx: *mut c_void,
     info: *const ffi::rocksdb_compactionjobinfo_t,
 ) {
-    let ctx = unsafe { &*(ctx as *mut E) };
-    let info = CompactionJobInfo { inner: info };
-    ctx.on_compaction_begin(&info);
+    abort_on_panic("on_compaction_begin", || {
+        // SAFETY: RocksDB passes back the live `Box<E>` pointer registered by
+        // `new_event_listener`; callback execution does not outlive that listener.
+        let ctx = unsafe { &*ctx.cast::<E>() };
+        let info = CompactionJobInfo { inner: info };
+        ctx.on_compaction_begin(&info);
+    });
 }
 
 extern "C" fn on_compaction_completed<E: EventListener>(
     ctx: *mut c_void,
     info: *const ffi::rocksdb_compactionjobinfo_t,
 ) {
-    let ctx = unsafe { &*(ctx as *mut E) };
-    let info = CompactionJobInfo { inner: info };
-    ctx.on_compaction_completed(&info);
+    abort_on_panic("on_compaction_completed", || {
+        // SAFETY: RocksDB passes back the live `Box<E>` pointer registered by
+        // `new_event_listener`; callback execution does not outlive that listener.
+        let ctx = unsafe { &*ctx.cast::<E>() };
+        let info = CompactionJobInfo { inner: info };
+        ctx.on_compaction_completed(&info);
+    });
 }
 
 extern "C" fn on_subcompaction_begin<E: EventListener>(
     ctx: *mut c_void,
     info: *const ffi::rocksdb_subcompactionjobinfo_t,
 ) {
-    let ctx = unsafe { &*(ctx as *mut E) };
-    let info = SubcompactionJobInfo { inner: info };
-    ctx.on_subcompaction_begin(&info);
+    abort_on_panic("on_subcompaction_begin", || {
+        // SAFETY: RocksDB passes back the live `Box<E>` pointer registered by
+        // `new_event_listener`; callback execution does not outlive that listener.
+        let ctx = unsafe { &*ctx.cast::<E>() };
+        let info = SubcompactionJobInfo { inner: info };
+        ctx.on_subcompaction_begin(&info);
+    });
 }
 
 extern "C" fn on_subcompaction_completed<E: EventListener>(
     ctx: *mut c_void,
     info: *const ffi::rocksdb_subcompactionjobinfo_t,
 ) {
-    let ctx = unsafe { &*(ctx as *mut E) };
-    let info = SubcompactionJobInfo { inner: info };
-    ctx.on_subcompaction_completed(&info);
+    abort_on_panic("on_subcompaction_completed", || {
+        // SAFETY: RocksDB passes back the live `Box<E>` pointer registered by
+        // `new_event_listener`; callback execution does not outlive that listener.
+        let ctx = unsafe { &*ctx.cast::<E>() };
+        let info = SubcompactionJobInfo { inner: info };
+        ctx.on_subcompaction_completed(&info);
+    });
 }
 
 extern "C" fn on_external_file_ingested<E: EventListener>(
     ctx: *mut c_void,
     info: *const ffi::rocksdb_externalfileingestioninfo_t,
 ) {
-    let ctx = unsafe { &*(ctx as *mut E) };
-    let info = IngestionInfo { inner: info };
-    ctx.on_external_file_ingested(&info);
+    abort_on_panic("on_external_file_ingested", || {
+        // SAFETY: RocksDB passes back the live `Box<E>` pointer registered by
+        // `new_event_listener`; callback execution does not outlive that listener.
+        let ctx = unsafe { &*ctx.cast::<E>() };
+        let info = IngestionInfo { inner: info };
+        ctx.on_external_file_ingested(&info);
+    });
 }
 
 extern "C" fn on_stall_conditions_changed<E: EventListener>(
     ctx: *mut c_void,
     info: *const ffi::rocksdb_writestallinfo_t,
 ) {
-    let ctx = unsafe { &*(ctx as *mut E) };
-    let info = WriteStallInfo { inner: info };
-    ctx.on_stall_conditions_changed(&info);
+    abort_on_panic("on_stall_conditions_changed", || {
+        // SAFETY: RocksDB passes back the live `Box<E>` pointer registered by
+        // `new_event_listener`; callback execution does not outlive that listener.
+        let ctx = unsafe { &*ctx.cast::<E>() };
+        let info = WriteStallInfo { inner: info };
+        ctx.on_stall_conditions_changed(&info);
+    });
 }
 
 extern "C" fn on_memtable_sealed<E: EventListener>(
     ctx: *mut c_void,
     info: *const ffi::rocksdb_memtableinfo_t,
 ) {
-    let ctx = unsafe { &*(ctx as *mut E) };
-    let info = MemTableInfo { inner: info };
-    ctx.on_memtable_sealed(&info);
+    abort_on_panic("on_memtable_sealed", || {
+        // SAFETY: RocksDB passes back the live `Box<E>` pointer registered by
+        // `new_event_listener`; callback execution does not outlive that listener.
+        let ctx = unsafe { &*ctx.cast::<E>() };
+        let info = MemTableInfo { inner: info };
+        ctx.on_memtable_sealed(&info);
+    });
 }
 
 extern "C" fn on_background_error<E: EventListener>(
@@ -755,12 +810,16 @@ extern "C" fn on_background_error<E: EventListener>(
     reason: u32,
     status_ptr: *mut ffi::rust_rocksdb_status_t,
 ) {
-    let ctx = unsafe { &*(ctx as *mut E) };
-    let status = MutableStatus {
-        result: status_result(status_ptr),
-        ptr: status_ptr,
-    };
-    ctx.on_background_error(DBBackgroundErrorReason::from(reason), &status);
+    abort_on_panic("on_background_error", || {
+        // SAFETY: RocksDB passes back the live `Box<E>` pointer registered by
+        // `new_event_listener`; callback execution does not outlive that listener.
+        let ctx = unsafe { &*ctx.cast::<E>() };
+        let status = MutableStatus {
+            result: status_result(status_ptr),
+            ptr: status_ptr,
+        };
+        ctx.on_background_error(DBBackgroundErrorReason::from(reason), &status);
+    });
 }
 
 extern "C" fn on_error_recovery_begin<E: EventListener>(
@@ -769,28 +828,42 @@ extern "C" fn on_error_recovery_begin<E: EventListener>(
     status_ptr: *mut ffi::rust_rocksdb_status_t,
     auto_recovery: *mut u8,
 ) {
-    let ctx = unsafe { &*(ctx as *mut E) };
-    let status = background_error_status(status_ptr);
-    let mut auto_recovery_value = unsafe { !auto_recovery.is_null() && *auto_recovery != 0 };
-    ctx.on_error_recovery_begin(
-        DBBackgroundErrorReason::from(reason),
-        &status,
-        &mut auto_recovery_value,
-    );
-    if !auto_recovery.is_null() {
-        unsafe {
-            *auto_recovery = u8::from(auto_recovery_value);
+    abort_on_panic("on_error_recovery_begin", || {
+        // SAFETY: RocksDB passes back the live `Box<E>` pointer registered by
+        // `new_event_listener`; callback execution does not outlive that listener.
+        let ctx = unsafe { &*ctx.cast::<E>() };
+        let status = background_error_status(status_ptr);
+        let mut auto_recovery_value = if auto_recovery.is_null() {
+            false
+        } else {
+            // SAFETY: RocksDB supplies a live `u8` flag for this callback.
+            unsafe { *auto_recovery != 0 }
+        };
+        ctx.on_error_recovery_begin(
+            DBBackgroundErrorReason::from(reason),
+            &status,
+            &mut auto_recovery_value,
+        );
+        if !auto_recovery.is_null() {
+            // SAFETY: The non-null flag remains valid for the callback duration.
+            unsafe {
+                *auto_recovery = u8::from(auto_recovery_value);
+            }
         }
-    }
+    });
 }
 
 extern "C" fn on_error_recovery_end<E: EventListener>(
     ctx: *mut c_void,
     info: *const ffi::rust_rocksdb_background_error_recovery_info_t,
 ) {
-    let ctx = unsafe { &*(ctx as *mut E) };
-    let info = background_error_recovery_info(info);
-    ctx.on_error_recovery_end(&info);
+    abort_on_panic("on_error_recovery_end", || {
+        // SAFETY: RocksDB passes back the live `Box<E>` pointer registered by
+        // `new_event_listener`; callback execution does not outlive that listener.
+        let ctx = unsafe { &*ctx.cast::<E>() };
+        let info = background_error_recovery_info(info);
+        ctx.on_error_recovery_end(&info);
+    });
 }
 
 pub(crate) struct EventListenerHandle {
