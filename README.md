@@ -233,9 +233,24 @@ default-features = false
 features = ["bindgen-static", "snappy", "lz4", "zstd", "zlib", "bzip2"]
 ```
 
-The `bindgen-static` feature enables the `static` feature of bindgen, which statically links to libclang. This is suitable for musllinux platforms, such as Alpine Linux.
+For a minimal static-bindgen smoke check without the optional compression
+backends, the Cargo command must also disable default features:
 
-> **⚠️ Important**: The `runtime` and `static` features are mutually exclusive and won't compile if both are enabled.
+```bash
+cargo check --no-default-features --features bindgen-static
+```
+
+The `bindgen-static` feature statically links bindgen to libclang. It requires
+static libclang plus a compatible LLVM installation and an `llvm-config` from
+that same installation. Set `LLVM_CONFIG_PATH` to that `llvm-config` executable
+and `LIBCLANG_STATIC_PATH` to the directory containing `libclang.a` (or
+`libclang.lib` on Windows). The CI gate exercises this mode on Alpine Linux;
+macOS and Windows static-link setups are not currently validated here.
+
+> **⚠️ Important**: `bindgen-runtime` is enabled by default, so static mode must
+> use `--no-default-features --features bindgen-static`. The
+> `rust-librocksdb-sys` crate explicitly rejects builds that enable both
+> `bindgen-runtime` and `bindgen-static`.
 
 ### Advanced Features
 

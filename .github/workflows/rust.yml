@@ -30,6 +30,98 @@ jobs:
       - name: Run rustfmt
         run: cargo fmt --all -- --check
 
+  bindgen-static:
+    name: Bindgen (static libclang on Alpine)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Check bindgen-static with static libclang
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/source:ro" \
+            --workdir / \
+            --env CARGO_HOME=/tmp/cargo-home \
+            --env CARGO_TARGET_DIR=/tmp/rust-rocksdb-bindgen-static-target \
+            --env RUSTUP_HOME=/tmp/rustup-home \
+            --env LLVM_CONFIG_PATH=/usr/lib/llvm21/bin/llvm-config \
+            --env LIBCLANG_STATIC_PATH=/usr/lib/llvm21/lib \
+            --env LIBCLANG_PATH=/runtime-libclang-must-not-exist \
+            --env "RUSTFLAGS=-C target-feature=-crt-static" \
+            alpine:3.24 \
+            sh -euxc '
+              apk add --no-cache \
+                build-base \
+                ca-certificates \
+                clang21-dev \
+                clang21-static \
+                libffi-dev \
+                linux-headers \
+                llvm21-dev \
+                ncurses-dev \
+                rustup \
+                zlib-dev
+
+              mkdir /work
+              cp -a /source/. /work/
+              cd /work
+
+              test -x "$LLVM_CONFIG_PATH"
+              test -f "$LIBCLANG_STATIC_PATH/libclang.a"
+              test ! -e "$LIBCLANG_PATH"
+
+              rustup-init -y --profile minimal --default-toolchain 1.91.0
+              export PATH="$CARGO_HOME/bin:$PATH"
+              rustc --version | grep -F "rustc 1.91.0"
+
+              feature_tree="$(
+                cargo tree \
+                  --no-default-features \
+                  --features bindgen-static \
+                  -e features \
+                  -i clang-sys
+              )"
+              printf "%s\n" "$feature_tree"
+              printf "%s\n" "$feature_tree" | grep -F "clang-sys feature \"static\""
+              if printf "%s\n" "$feature_tree" | grep -F "clang-sys feature \"runtime\""; then
+                echo "bindgen-static unexpectedly enabled clang-sys/runtime" >&2
+                exit 1
+              fi
+
+              if dual_output="$(
+                cargo check \
+                  -p rust-librocksdb-sys \
+                  --no-default-features \
+                  --features bindgen-runtime,bindgen-static \
+                  2>&1
+              )"; then
+                echo "the mutually exclusive bindgen features unexpectedly compiled" >&2
+                exit 1
+              fi
+              printf "%s\n" "$dual_output"
+              printf "%s\n" "$dual_output" |
+                grep -E "(\`bindgen-runtime\` and \`bindgen-static\` are mutually exclusive|\`runtime\` and \`static\` features can.t be combined)"
+              grep -F \
+                "compile_error!(\"\`bindgen-runtime\` and \`bindgen-static\` are mutually exclusive\")" \
+                librocksdb-sys/build.rs
+
+              cargo check --no-default-features --features bindgen-static
+
+              bindings_path="$(
+                find "$CARGO_TARGET_DIR" -type f -path "*/out/bindings.rs" -print -quit
+              )"
+              test -n "$bindings_path"
+              test -s "$bindings_path"
+              printf "generated bindings: %s\n" "$bindings_path"
+            '
+
   doc-check:
     name: Rustdoc-check
     runs-on: ubuntu-latest

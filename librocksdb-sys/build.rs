@@ -17,6 +17,9 @@
 //! Every variable that can influence the build is registered with
 //! `cargo::rerun-if-env-changed=` at the top of [`main`].
 
+#[cfg(all(feature = "bindgen-runtime", feature = "bindgen-static"))]
+compile_error!("`bindgen-runtime` and `bindgen-static` are mutually exclusive");
+
 use std::env;
 use std::path::{Path, PathBuf};
 

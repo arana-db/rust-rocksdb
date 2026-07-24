@@ -31,7 +31,7 @@ exclude = [
 ]
 
 [features]
-default = ["static", "bindgen/runtime"]
+default = ["static", "bindgen-runtime"]
 jemalloc = ["tikv-jemalloc-sys"]
 static = ["libz-sys?/static", "bzip2-sys?/static"]
 bindgen-runtime = ["bindgen/runtime"]
