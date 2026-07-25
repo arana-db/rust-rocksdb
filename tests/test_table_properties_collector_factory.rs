@@ -22,7 +22,7 @@ use std::{
     path::Path,
     process::{Child, Command, ExitStatus, Output, Stdio},
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
@@ -917,17 +917,97 @@ fn skip_bundled_backend_only_test() -> bool {
 struct ChildWatchdogResult {
     output: Output,
     timed_out: bool,
-    poll_error: Option<String>,
-    kill_error: Option<String>,
+    poll_error: Option<io::Error>,
+}
+
+#[derive(Debug)]
+struct ChildWatchdogError {
+    timed_out: bool,
+    poll_error: Option<io::Error>,
+    operation: &'static str,
+    operation_error: io::Error,
+}
+
+impl std::fmt::Display for ChildWatchdogError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "child watchdog {} failed: {}; timed_out={}; poll_error={:?}",
+            self.operation, self.operation_error, self.timed_out, self.poll_error
+        )
+    }
+}
+
+impl std::error::Error for ChildWatchdogError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.operation_error)
+    }
+}
+
+static CHILD_REAPER_SENDER: OnceLock<Result<mpsc::Sender<Child>, io::Error>> = OnceLock::new();
+
+fn child_reaper_sender() -> Result<&'static mpsc::Sender<Child>, &'static io::Error> {
+    match CHILD_REAPER_SENDER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<Child>();
+        thread::Builder::new()
+            .name("rust-rocksdb-test-child-reaper".to_owned())
+            .spawn(move || {
+                while let Ok(child) = receiver.recv() {
+                    if let Err(error) = child.wait_with_output() {
+                        eprintln!("async child reaper failed to wait for child output: {error}");
+                    }
+                }
+            })
+            .map(|_| sender)
+    }) {
+        Ok(sender) => Ok(sender),
+        Err(error) => Err(error),
+    }
+}
+
+fn submit_child_to_reaper(sender: &mpsc::Sender<Child>, child: Child) {
+    if let Err(error) = sender.send(child) {
+        // The sender is stored in a process-lifetime OnceLock and the worker
+        // handles wait failures without unwinding, so disconnect is unreachable.
+        // Avoid dropping an unreaped child even if that invariant is violated.
+        std::mem::forget(error.0);
+        panic!("fixed child reaper unexpectedly disconnected");
+    }
 }
 
 fn wait_for_child_with_watchdog<F>(
-    mut child: Child,
+    child: Child,
     timeout: Duration,
-    mut poll: F,
+    poll: F,
+    child_reaper: &'static mpsc::Sender<Child>,
 ) -> io::Result<ChildWatchdogResult>
 where
     F: FnMut(&mut Child) -> io::Result<Option<ExitStatus>>,
+{
+    wait_for_child_with_watchdog_ops(
+        child,
+        timeout,
+        poll,
+        Child::kill,
+        Child::wait_with_output,
+        move |child| submit_child_to_reaper(child_reaper, child),
+    )
+    .map_err(io::Error::other)
+}
+
+fn wait_for_child_with_watchdog_ops<C, P, K, W, R>(
+    mut child: C,
+    timeout: Duration,
+    mut poll: P,
+    kill: K,
+    wait_with_output: W,
+    submit_reaper: R,
+) -> Result<ChildWatchdogResult, ChildWatchdogError>
+where
+    P: FnMut(&mut C) -> io::Result<Option<ExitStatus>>,
+    K: FnOnce(&mut C) -> io::Result<()>,
+    W: FnOnce(C) -> io::Result<Output>,
+    R: FnOnce(C),
 {
     let deadline = Instant::now() + timeout;
     let (timed_out, poll_error) = loop {
@@ -939,21 +1019,237 @@ where
                 // controlled by explicit markers and blocking primitives.
                 thread::sleep(Duration::from_millis(10));
             }
-            Err(error) => break (false, Some(error.to_string())),
+            Err(error) => break (false, Some(error)),
         }
     };
-    let kill_error = if timed_out || poll_error.is_some() {
-        child.kill().err().map(|error| error.to_string())
-    } else {
-        None
+    if (timed_out || poll_error.is_some())
+        && let Err(operation_error) = kill(&mut child)
+        && !matches!(poll(&mut child), Ok(Some(_)))
+    {
+        submit_reaper(child);
+        return Err(ChildWatchdogError {
+            timed_out,
+            poll_error,
+            operation: "kill",
+            operation_error,
+        });
+    }
+    let output = match wait_with_output(child) {
+        Ok(output) => output,
+        Err(operation_error) => {
+            return Err(ChildWatchdogError {
+                timed_out,
+                poll_error,
+                operation: "wait_with_output",
+                operation_error,
+            });
+        }
     };
-    let output = child.wait_with_output()?;
     Ok(ChildWatchdogResult {
         output,
         timed_out,
         poll_error,
-        kill_error,
     })
+}
+
+#[cfg(unix)]
+fn successful_watchdog_test_output() -> Output {
+    use std::os::unix::process::ExitStatusExt;
+
+    Output {
+        status: ExitStatus::from_raw(0),
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    }
+}
+
+#[cfg(windows)]
+fn successful_watchdog_test_output() -> Output {
+    use std::os::windows::process::ExitStatusExt;
+
+    Output {
+        status: ExitStatus::from_raw(0),
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    }
+}
+
+#[test]
+fn child_watchdog_poll_error_kills_and_waits_for_child() {
+    let kill_calls = Arc::new(AtomicUsize::new(0));
+    let observed_kill_calls = Arc::clone(&kill_calls);
+    let wait_calls = Arc::new(AtomicUsize::new(0));
+    let observed_wait_calls = Arc::clone(&wait_calls);
+
+    let watchdog = wait_for_child_with_watchdog_ops(
+        (),
+        Duration::from_secs(1),
+        |_| Err::<Option<ExitStatus>, _>(io::Error::other(INJECTED_POLL_ERROR)),
+        move |_| {
+            observed_kill_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        },
+        move |_| {
+            observed_wait_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(successful_watchdog_test_output())
+        },
+        |_| panic!("reaper must not run after a successful kill"),
+    )
+    .expect("poll failure with successful kill must reap the child");
+
+    assert_eq!(kill_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wait_calls.load(Ordering::SeqCst), 1);
+    assert!(!watchdog.timed_out, "{watchdog:?}");
+    assert_eq!(
+        watchdog.poll_error.as_ref().map(io::Error::to_string),
+        Some(INJECTED_POLL_ERROR.to_owned())
+    );
+}
+
+#[test]
+fn child_watchdog_timeout_kills_and_waits_for_child() {
+    let kill_calls = Arc::new(AtomicUsize::new(0));
+    let observed_kill_calls = Arc::clone(&kill_calls);
+    let wait_calls = Arc::new(AtomicUsize::new(0));
+    let observed_wait_calls = Arc::clone(&wait_calls);
+
+    let watchdog = wait_for_child_with_watchdog_ops(
+        (),
+        Duration::ZERO,
+        |_| Ok(None),
+        move |_| {
+            observed_kill_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        },
+        move |_| {
+            observed_wait_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(successful_watchdog_test_output())
+        },
+        |_| panic!("reaper must not run after a successful kill"),
+    )
+    .expect("timeout with successful kill must reap the child");
+
+    assert_eq!(kill_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wait_calls.load(Ordering::SeqCst), 1);
+    assert!(watchdog.timed_out, "{watchdog:?}");
+    assert!(watchdog.poll_error.is_none(), "{watchdog:?}");
+}
+
+#[test]
+fn child_watchdog_kill_error_does_not_enter_wait_path() {
+    let wait_calls = Arc::new(AtomicUsize::new(0));
+    let observed_wait_calls = Arc::clone(&wait_calls);
+    let reaper_calls = Arc::new(AtomicUsize::new(0));
+    let observed_reaper_calls = Arc::clone(&reaper_calls);
+
+    let error = wait_for_child_with_watchdog_ops(
+        (),
+        Duration::ZERO,
+        |_| {
+            Err::<Option<ExitStatus>, _>(io::Error::new(
+                io::ErrorKind::TimedOut,
+                INJECTED_POLL_ERROR,
+            ))
+        },
+        |_| Err(io::Error::from_raw_os_error(5)),
+        move |_| {
+            observed_wait_calls.fetch_add(1, Ordering::SeqCst);
+            Err::<Output, _>(io::Error::other("wait must not be called after kill fails"))
+        },
+        move |_| {
+            observed_reaper_calls.fetch_add(1, Ordering::SeqCst);
+        },
+    )
+    .expect_err("kill failure must terminate the watchdog without waiting");
+
+    assert_eq!(wait_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(reaper_calls.load(Ordering::SeqCst), 1);
+    assert!(!error.timed_out, "{error}");
+    let poll_error = error
+        .poll_error
+        .as_ref()
+        .expect("kill error must retain the original poll error");
+    assert_eq!(poll_error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(poll_error.to_string(), INJECTED_POLL_ERROR);
+    assert_eq!(error.operation, "kill");
+    assert_eq!(error.operation_error.raw_os_error(), Some(5));
+    let source = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<io::Error>())
+        .expect("watchdog error source must be the original kill error");
+    assert_eq!(source.raw_os_error(), Some(5));
+}
+
+#[test]
+fn child_watchdog_kill_error_after_child_exit_waits_for_output() {
+    let poll_calls = Arc::new(AtomicUsize::new(0));
+    let observed_poll_calls = Arc::clone(&poll_calls);
+    let wait_calls = Arc::new(AtomicUsize::new(0));
+    let observed_wait_calls = Arc::clone(&wait_calls);
+
+    let watchdog = wait_for_child_with_watchdog_ops(
+        (),
+        Duration::ZERO,
+        move |_| match observed_poll_calls.fetch_add(1, Ordering::SeqCst) {
+            0 => Ok(None),
+            1 => Ok(Some(successful_watchdog_test_output().status)),
+            call => panic!("watchdog unexpectedly polled child a third time: {call}"),
+        },
+        |_| Err(io::Error::from_raw_os_error(5)),
+        move |_| {
+            observed_wait_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(successful_watchdog_test_output())
+        },
+        |_| panic!("reaper must not run after the child has already exited"),
+    )
+    .expect("kill error after child exit must still collect its output");
+
+    assert_eq!(poll_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(wait_calls.load(Ordering::SeqCst), 1);
+    assert!(watchdog.timed_out, "{watchdog:?}");
+    assert!(watchdog.poll_error.is_none(), "{watchdog:?}");
+    assert!(watchdog.output.status.success(), "{watchdog:?}");
+}
+
+#[test]
+fn child_watchdog_wait_error_returns_with_poll_context() {
+    let kill_calls = Arc::new(AtomicUsize::new(0));
+    let observed_kill_calls = Arc::clone(&kill_calls);
+    let wait_calls = Arc::new(AtomicUsize::new(0));
+    let observed_wait_calls = Arc::clone(&wait_calls);
+
+    let error = wait_for_child_with_watchdog_ops(
+        (),
+        Duration::from_secs(1),
+        |_| Err::<Option<ExitStatus>, _>(io::Error::other(INJECTED_POLL_ERROR)),
+        move |_| {
+            observed_kill_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        },
+        move |_| {
+            observed_wait_calls.fetch_add(1, Ordering::SeqCst);
+            Err(io::Error::other("injected child wait error"))
+        },
+        |_| panic!("reaper must not run after a successful kill"),
+    )
+    .expect_err("wait failure must return instead of losing watchdog context");
+
+    assert_eq!(kill_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wait_calls.load(Ordering::SeqCst), 1);
+    assert!(!error.timed_out, "{error}");
+    assert_eq!(
+        error.poll_error.as_ref().map(io::Error::to_string),
+        Some(INJECTED_POLL_ERROR.to_owned())
+    );
+    assert_eq!(error.operation, "wait_with_output");
+    assert_eq!(error.operation_error.kind(), io::ErrorKind::Other);
+    assert_eq!(
+        error.operation_error.to_string(),
+        "injected child wait error"
+    );
+    let source = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<io::Error>())
+        .expect("watchdog error source must be the original wait error");
+    assert_eq!(source.kind(), io::ErrorKind::Other);
 }
 
 #[test]
@@ -988,6 +1284,8 @@ fn child_watchdog_poll_error_subprocess_entry() {
 fn child_watchdog_reaps_running_child_before_reporting_poll_error() {
     let marker_dir = tempfile::tempdir().expect("create watchdog poll-error marker directory");
     let started_path = marker_dir.path().join("child-started");
+    let child_reaper =
+        child_reaper_sender().expect("start child reaper before spawning watchdog child process");
     let mut child = Command::new(env::current_exe().expect("locate current test executable"))
         .args([
             "--exact",
@@ -1011,29 +1309,34 @@ fn child_watchdog_reaps_running_child_before_reporting_poll_error() {
     let poll_marker_completions = Arc::clone(&marker_completions);
     let poll_started_path = started_path.clone();
 
-    let watchdog = wait_for_child_with_watchdog(child, Duration::from_secs(15), move |child| {
-        if fs::read_to_string(&poll_started_path)
-            .is_ok_and(|marker| marker == WATCHDOG_POLL_ERROR_STARTED_MARKER)
-            && poll_injections.load(Ordering::SeqCst) == 0
-        {
-            let status = child.try_wait()?;
-            assert!(
-                status.is_none(),
-                "watchdog poll-error child exited before error injection: {status:?}"
-            );
-            poll_injections.fetch_add(1, Ordering::SeqCst);
-            return Err(io::Error::other(INJECTED_POLL_ERROR));
-        }
-        if fs::read_to_string(&poll_started_path)
-            .is_ok_and(|marker| marker == WATCHDOG_POLL_ERROR_PARTIAL_MARKER)
-            && poll_marker_completions.load(Ordering::SeqCst) == 0
-        {
-            child_stdin.write_all(b"1")?;
-            child_stdin.flush()?;
-            poll_marker_completions.fetch_add(1, Ordering::SeqCst);
-        }
-        child.try_wait()
-    })
+    let watchdog = wait_for_child_with_watchdog(
+        child,
+        Duration::from_secs(15),
+        move |child| {
+            if fs::read_to_string(&poll_started_path)
+                .is_ok_and(|marker| marker == WATCHDOG_POLL_ERROR_STARTED_MARKER)
+                && poll_injections.load(Ordering::SeqCst) == 0
+            {
+                let status = child.try_wait()?;
+                assert!(
+                    status.is_none(),
+                    "watchdog poll-error child exited before error injection: {status:?}"
+                );
+                poll_injections.fetch_add(1, Ordering::SeqCst);
+                return Err(io::Error::other(INJECTED_POLL_ERROR));
+            }
+            if fs::read_to_string(&poll_started_path)
+                .is_ok_and(|marker| marker == WATCHDOG_POLL_ERROR_PARTIAL_MARKER)
+                && poll_marker_completions.load(Ordering::SeqCst) == 0
+            {
+                child_stdin.write_all(b"1")?;
+                child_stdin.flush()?;
+                poll_marker_completions.fetch_add(1, Ordering::SeqCst);
+            }
+            child.try_wait()
+        },
+        child_reaper,
+    )
     .expect("watchdog must reap the child before returning the poll error");
 
     assert_eq!(injections.load(Ordering::SeqCst), 1);
@@ -1043,8 +1346,10 @@ fn child_watchdog_reaps_running_child_before_reporting_poll_error() {
         "the watchdog must not inject a poll error before the marker is complete"
     );
     assert!(!watchdog.timed_out, "{watchdog:?}");
-    assert_eq!(watchdog.poll_error.as_deref(), Some(INJECTED_POLL_ERROR));
-    assert!(watchdog.kill_error.is_none(), "{watchdog:?}");
+    assert_eq!(
+        watchdog.poll_error.as_ref().map(io::Error::to_string),
+        Some(INJECTED_POLL_ERROR.to_owned())
+    );
     assert!(
         !watchdog.output.status.success(),
         "poll-error child was not terminated: {watchdog:?}"
@@ -1721,6 +2026,8 @@ fn factory_create_overlaps_between_real_flush_and_manual_compaction() {
     let timeout = Duration::from_secs(75);
     let path_ref = &path;
     let db_path: &Path = path_ref.as_ref();
+    let child_reaper =
+        child_reaper_sender().expect("start child reaper before spawning overlap child process");
     let child = Command::new(env::current_exe().expect("locate current test executable"))
         .args([
             "--exact",
@@ -1733,7 +2040,7 @@ fn factory_create_overlaps_between_real_flush_and_manual_compaction() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn collector overlap child process");
-    let watchdog = wait_for_child_with_watchdog(child, timeout, Child::try_wait)
+    let watchdog = wait_for_child_with_watchdog(child, timeout, Child::try_wait, child_reaper)
         .expect("wait for collector overlap child process");
     let output = &watchdog.output;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1741,14 +2048,12 @@ fn factory_create_overlaps_between_real_flush_and_manual_compaction() {
 
     assert!(
         !watchdog.timed_out,
-        "collector overlap child exceeded {timeout:?}; kill_error={:?}; stdout={stdout}; stderr={stderr}",
-        watchdog.kill_error
+        "collector overlap child exceeded {timeout:?}; stdout={stdout}; stderr={stderr}"
     );
     assert!(
         watchdog.poll_error.is_none(),
-        "poll collector overlap child process: {:?}; kill_error={:?}; stdout={stdout}; stderr={stderr}",
-        watchdog.poll_error,
-        watchdog.kill_error
+        "poll collector overlap child process: {:?}; stdout={stdout}; stderr={stderr}",
+        watchdog.poll_error
     );
     assert!(
         output.status.success(),

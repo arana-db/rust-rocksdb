@@ -2,11 +2,37 @@
 
 ## Unreleased
 
+- test: make the asynchronous callback-panic watchdog surface poll and wait
+  errors, and hand a still-running child to a fixed worker/reaper when kill
+  fails instead of synchronously waiting without a bound.
+- ci: use the supported `cache-save-if` input for all five Rust cache steps so
+  successful jobs can save their caches without workflow warnings.
+- docs(metadata): point the root crate homepage/repository and
+  `rust-librocksdb-sys` repository at `arana-db/rust-rocksdb`. The immutable
+  `v0.51.0-arana.1` tag still contains the previous repository metadata.
+
+## 0.51.0-arana.1 (2026-07-24)
+
+- feat(table-properties): add safe Rust `TablePropertiesCollector` and
+  `TablePropertiesCollectorFactory` APIs backed by additive C ABI and C++
+  adapters. Factories are `Send + Sync + 'static`, create collectors through
+  `create(&self, context)`, and collectors preserve arbitrary binary keys and
+  values in the user-collected property map returned by `finish`.
+- safety(table-properties): contain panics at every Rust collector/factory FFI
+  callback boundary, validate pointer/length pairs, and transfer native
+  ownership exactly once. The system-RocksDB backend reports collector-factory
+  capability `0`; safe registration fails closed instead of assuming that a
+  system library exports the Arana extension symbols.
+- docs(table-properties): `get_readable_properties` is diagnostic data used by
+  RocksDB while building/logging an SST. RocksDB does not persist that map in
+  the table property block, so SST readback or reopening a DB may return an
+  empty readable map. Durable recovery metadata must be returned from `finish`
+  as user-collected properties.
 - breaking(event-listener): `EventListener::on_background_error` now receives
   `status: &MutableStatus` instead of `status: MutableStatus`; downstream
-  `EventListener` implementations must update their method signature. Listener
-  registration now requires `'static`, every listener callback and destructor
-  aborts with a fixed diagnostic if user code panics, and the public low-level
+  implementations must update their method signature. Listener registration
+  now requires `'static`, every listener callback and destructor aborts with a
+  fixed diagnostic if user code panics, and the public low-level
   `DBEventListener`/`new_event_listener` API remains available while its native
   handle is released exactly once by RAII unless ownership is transferred to
   RocksDB.
