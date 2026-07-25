@@ -220,7 +220,7 @@ jobs:
       - name: Install rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+          cache-save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - uses: taiki-e/install-action@nextest
 
@@ -266,7 +266,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache-key: "v1-rust-system-rocksdb"
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+          cache-save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install native build dependencies
         run: |
@@ -390,7 +390,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache-key: "v1-rust-multi-threaded-cf"
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+          cache-save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - uses: taiki-e/install-action@nextest
 
@@ -443,7 +443,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache-key: "v1-rust-jemalloc"
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+          cache-save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - uses: taiki-e/install-action@nextest
 
@@ -477,7 +477,7 @@ jobs:
           toolchain: nightly
           components: rust-src
           cache-key: "v1-rust-asan"
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+          cache-save-if: ${{ github.ref == 'refs/heads/master' }}
           rustflags: ""
 
       - name: Install dependencies
