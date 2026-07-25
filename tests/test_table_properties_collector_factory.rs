@@ -1022,16 +1022,16 @@ where
             Err(error) => break (false, Some(error)),
         }
     };
-    if timed_out || poll_error.is_some() {
-        if let Err(operation_error) = kill(&mut child) {
-            submit_reaper(child);
-            return Err(ChildWatchdogError {
-                timed_out,
-                poll_error,
-                operation: "kill",
-                operation_error,
-            });
-        }
+    if (timed_out || poll_error.is_some())
+        && let Err(operation_error) = kill(&mut child)
+    {
+        submit_reaper(child);
+        return Err(ChildWatchdogError {
+            timed_out,
+            poll_error,
+            operation: "kill",
+            operation_error,
+        });
     }
     let output = match wait_with_output(child) {
         Ok(output) => output,
