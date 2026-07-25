@@ -1024,6 +1024,7 @@ where
     };
     if (timed_out || poll_error.is_some())
         && let Err(operation_error) = kill(&mut child)
+        && !matches!(poll(&mut child), Ok(Some(_)))
     {
         submit_reaper(child);
         return Err(ChildWatchdogError {
@@ -1176,6 +1177,37 @@ fn child_watchdog_kill_error_does_not_enter_wait_path() {
         .and_then(|source| source.downcast_ref::<io::Error>())
         .expect("watchdog error source must be the original kill error");
     assert_eq!(source.raw_os_error(), Some(5));
+}
+
+#[test]
+fn child_watchdog_kill_error_after_child_exit_waits_for_output() {
+    let poll_calls = Arc::new(AtomicUsize::new(0));
+    let observed_poll_calls = Arc::clone(&poll_calls);
+    let wait_calls = Arc::new(AtomicUsize::new(0));
+    let observed_wait_calls = Arc::clone(&wait_calls);
+
+    let watchdog = wait_for_child_with_watchdog_ops(
+        (),
+        Duration::ZERO,
+        move |_| match observed_poll_calls.fetch_add(1, Ordering::SeqCst) {
+            0 => Ok(None),
+            1 => Ok(Some(successful_watchdog_test_output().status)),
+            call => panic!("watchdog unexpectedly polled child a third time: {call}"),
+        },
+        |_| Err(io::Error::from_raw_os_error(5)),
+        move |_| {
+            observed_wait_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(successful_watchdog_test_output())
+        },
+        |_| panic!("reaper must not run after the child has already exited"),
+    )
+    .expect("kill error after child exit must still collect its output");
+
+    assert_eq!(poll_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(wait_calls.load(Ordering::SeqCst), 1);
+    assert!(watchdog.timed_out, "{watchdog:?}");
+    assert!(watchdog.poll_error.is_none(), "{watchdog:?}");
+    assert!(watchdog.output.status.success(), "{watchdog:?}");
 }
 
 #[test]
